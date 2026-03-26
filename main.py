@@ -21,6 +21,9 @@ from executor import should_execute, log_opportunity, execute_arb
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
 def _setup_logging() -> None:
+    # Force line-buffered stdout so print() shows up immediately in systemd logs.
+    sys.stdout.reconfigure(line_buffering=True)
+
     log_dir = Path(config.LOG_DIR)
     log_dir.mkdir(parents=True, exist_ok=True)
 
