@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+logs/*.log
+logs/*.jsonl
+contracts/*.abi.json
+contracts/*.bin
+.pytest_cache/
+*.egg-info/
+dist/
+build/

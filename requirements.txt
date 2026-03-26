@@ -1,0 +1,6 @@
+web3==6.15.1
+python-dotenv
+eth-abi
+requests
+py-solc-x
+pytest
