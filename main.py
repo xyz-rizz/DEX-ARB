@@ -351,13 +351,15 @@ def main() -> None:
         sys.exit(1)
 
     w3_read = Web3(Web3.HTTPProvider(config.BASE_RPC_URL))
-    if not w3_read.is_connected():
-        logger.critical("Cannot connect to CDP RPC: %s", config.BASE_RPC_URL)
+    try:
+        _block = w3_read.eth.block_number
+    except Exception as exc:
+        logger.critical("Cannot connect to CDP RPC %s: %s", config.BASE_RPC_URL, exc)
         sys.exit(1)
 
     w3_exec = Web3(Web3.HTTPProvider(config.ALCHEMY_EXEC_URL)) if config.ALCHEMY_EXEC_URL else None
 
-    logger.info("Connected to Base mainnet — block %d", w3_read.eth.block_number)
+    logger.info("Connected to Base mainnet — block %d", _block)
     _print_banner()
 
     stats = CycleStats()
