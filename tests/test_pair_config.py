@@ -1,6 +1,6 @@
 """
 Tests for PAIR_CONFIG update:
-  - Exactly 8 pairs
+  - Exactly 6 pairs (BRETT/WETH and WETH/USDC removed)
   - Dead pairs removed
   - New pairs have required fields and valid addresses
   - Kept pairs unchanged
@@ -13,15 +13,17 @@ from web3 import Web3
 EXPECTED_PAIRS = {
     "cbBTC/USDC",
     "cbBTC/WETH",
-    "WETH/USDC",
     "VIRTUAL/WETH",
-    "BRETT/WETH",
     "EURC/USDC",
     "USDC/USDT",
     "AERO/USDC",
 }
 
 REMOVED_PAIRS = [
+    # Removed in this update
+    "WETH/USDC",   # too competitive — 9 on-chain reverts, spread closes <1 block
+    "BRETT/WETH",  # phantom pool — PancakeSwap price=0, ~2000% garbage spread
+    # Removed in prior update
     "weETH/WETH",
     "cbETH/WETH",
     "wstETH/WETH",
@@ -48,11 +50,11 @@ def _pair(name: str) -> dict:
 
 # ── Test 1 ─────────────────────────────────────────────────────────────────────
 
-def test_pair_config_has_exactly_8_pairs():
-    """PAIR_CONFIG must contain exactly 8 pairs with the expected names."""
+def test_pair_config_has_exactly_6_pairs():
+    """PAIR_CONFIG must contain exactly 6 pairs with the expected names."""
     from config import PAIR_CONFIG
-    assert len(PAIR_CONFIG) == 8, (
-        f"Expected 8 pairs, got {len(PAIR_CONFIG)}: {[p['name'] for p in PAIR_CONFIG]}"
+    assert len(PAIR_CONFIG) == 6, (
+        f"Expected 6 pairs, got {len(PAIR_CONFIG)}: {[p['name'] for p in PAIR_CONFIG]}"
     )
     names = {p["name"] for p in PAIR_CONFIG}
     assert names == EXPECTED_PAIRS, (
@@ -65,13 +67,29 @@ def test_pair_config_has_exactly_8_pairs():
 # ── Test 2 ─────────────────────────────────────────────────────────────────────
 
 def test_removed_pairs_not_in_config():
-    """All 11 dead pairs must be absent from PAIR_CONFIG."""
+    """All dead pairs (including BRETT/WETH and WETH/USDC) must be absent from PAIR_CONFIG."""
     from config import PAIR_CONFIG
     names = {p["name"] for p in PAIR_CONFIG}
     still_present = [r for r in REMOVED_PAIRS if r in names]
     assert still_present == [], (
         f"Dead pairs still in config: {still_present}"
     )
+
+
+# ── Test 2b ────────────────────────────────────────────────────────────────────
+
+def test_brett_weth_not_in_config():
+    """BRETT/WETH removed: phantom pool with PancakeSwap price=0, ~2000% garbage spread."""
+    from config import PAIR_CONFIG
+    names = [p["name"] for p in PAIR_CONFIG]
+    assert "BRETT/WETH" not in names
+
+
+def test_weth_usdc_not_in_config():
+    """WETH/USDC removed: most competitive pair on Base, 9 confirmed on-chain reverts."""
+    from config import PAIR_CONFIG
+    names = [p["name"] for p in PAIR_CONFIG]
+    assert "WETH/USDC" not in names
 
 
 # ── Test 3 ─────────────────────────────────────────────────────────────────────
@@ -110,7 +128,7 @@ def test_new_pairs_have_required_fields():
 # ── Test 4 ─────────────────────────────────────────────────────────────────────
 
 def test_existing_pairs_unchanged():
-    """The 4 kept pairs must be unchanged from their original values."""
+    """The kept pairs must be unchanged from their original values."""
     # cbBTC/USDC
     cbbtc_usdc = _pair("cbBTC/USDC")
     assert cbbtc_usdc["token_in"].lower() == "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
@@ -120,23 +138,14 @@ def test_existing_pairs_unchanged():
     assert cbbtc_usdc["unit_size"] == 0.1
     assert cbbtc_usdc["min_liquidity_usd"] == 100_000
 
-    # WETH/USDC
-    weth_usdc = _pair("WETH/USDC")
-    assert weth_usdc["token_in"].lower() == "0x4200000000000000000000000000000000000006"
-    assert weth_usdc["token_out"].lower() == "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-    assert weth_usdc["dec_in"] == 18
-    assert weth_usdc["dec_out"] == 6
-    assert weth_usdc["unit_size"] == 1.0
-    assert weth_usdc["min_liquidity_usd"] == 200_000
-
-    # BRETT/WETH — still present
-    brett = _pair("BRETT/WETH")
-    assert brett["token_in"].lower() == "0x532f27101965dd16442e59d40670faf5ebb142e4"
-    assert brett["dec_in"] == 18
-    assert brett["dec_out"] == 18
-
     # VIRTUAL/WETH — still present
     virtual = _pair("VIRTUAL/WETH")
     assert virtual["token_in"].lower() == "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b"
     assert virtual["dec_in"] == 18
     assert virtual["dec_out"] == 18
+
+    # cbBTC/WETH — still present
+    cbbtc_weth = _pair("cbBTC/WETH")
+    assert cbbtc_weth["token_in"].lower() == "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+    assert cbbtc_weth["dec_in"] == 8
+    assert cbbtc_weth["dec_out"] == 18

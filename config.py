@@ -121,7 +121,12 @@ UNISWAP_FEE_PCT_WEETH_WETH: float = 0.0001
 # ── Chain ─────────────────────────────────────────────────────────────────────
 BASE_CHAIN_ID: int = 8453
 
-# ── Pair config — 8 high-conviction Base pairs ────────────────────────────────
+# ── Pair config — 6 high-conviction Base pairs ────────────────────────────────
+# Removed: WETH/USDC (most competitive pair on Base; 9 confirmed reverts — spread
+#           closes in <1 block, impossible at 2.5s cycle time)
+# Removed: BRETT/WETH (phantom pool — PancakeSwap price = 0.0000, producing a
+#           ~2000% garbage spread every cycle; killed by slippage in sim but
+#           wastes a full detect pass)
 PAIR_CONFIG = [
     {
         "name": "cbBTC/USDC",
@@ -140,27 +145,11 @@ PAIR_CONFIG = [
         "min_liquidity_usd": 100_000,
     },
     {
-        "name": "WETH/USDC",
-        "token_in":  "0x4200000000000000000000000000000000000006",
-        "token_out": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "dec_in": 18, "dec_out": 6,
-        "unit_size": 1.0,
-        "min_liquidity_usd": 200_000,
-    },
-    {
         "name": "VIRTUAL/WETH",
         "token_in":  "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b",
         "token_out": "0x4200000000000000000000000000000000000006",
         "dec_in": 18, "dec_out": 18,
         "unit_size": 1000.0,
-        "min_liquidity_usd": 30_000,
-    },
-    {
-        "name": "BRETT/WETH",
-        "token_in":  "0x532f27101965dd16442E59d40670FaF5eBB142E4",
-        "token_out": "0x4200000000000000000000000000000000000006",
-        "dec_in": 18, "dec_out": 18,
-        "unit_size": 100_000.0,
         "min_liquidity_usd": 30_000,
     },
     {
