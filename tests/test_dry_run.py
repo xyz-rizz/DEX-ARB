@@ -173,7 +173,7 @@ def test_execute_arb_passes_dry_gate_when_both_false():
     }
     mock_w3.eth.contract.return_value = mock_contract
     mock_w3.eth.account.sign_transaction.return_value = MagicMock(
-        raw_transaction=b"\x01\x02\x03"
+        rawTransaction=b"\x01\x02\x03"
     )
     # Simulate send failure — proves we reached the live path (past dry gate)
     mock_w3.eth.send_raw_transaction.side_effect = RuntimeError("simulated_rpc_failure")

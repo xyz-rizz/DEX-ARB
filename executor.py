@@ -335,7 +335,7 @@ def execute_arb(w3_exec, opp: ArbOpportunity, sim: SimResult,
 
         # ── Live execution (only when both dry_run=False AND DRY_RUN=false) ──
         signed  = w3_exec.eth.account.sign_transaction(tx, config.PRIVATE_KEY)
-        tx_hash = w3_exec.eth.send_raw_transaction(signed.raw_transaction)
+        tx_hash = w3_exec.eth.send_raw_transaction(signed.rawTransaction)
         logger.info("SENT | %s | tx_hash=%s", opp.pair, tx_hash.hex())
 
         receipt = w3_exec.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
