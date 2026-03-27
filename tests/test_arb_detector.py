@@ -220,12 +220,19 @@ def test_tier_marginal_at_007_pct():
 
 
 def test_tier_below_at_004_pct():
-    """BELOW tier: net_spread > 0 but < 0.065% → no flash loan."""
-    assert assign_tier(0.04) == "BELOW"
-    assert assign_tier(0.001) == "BELOW"
-
-    flash, _ = calculate_trade_size(68000.0, 0.04, 50_000.0)
-    assert flash == 0.0
+    """BELOW tier: net_spread > 0 but < 0.065% → no flash loan.
+    Pin TIER_MARGINAL_PCT to default 0.065 so test is .env-independent."""
+    with patch("arb_detector.config") as mock_cfg:
+        mock_cfg.TIER_PRIME_PCT      = 0.15
+        mock_cfg.TIER_GOOD_PCT       = 0.10
+        mock_cfg.TIER_MARGINAL_PCT   = 0.065
+        mock_cfg.FLASH_PRIME_USDC    = 50_000.0
+        mock_cfg.FLASH_GOOD_USDC     = 34_000.0
+        mock_cfg.FLASH_MARGINAL_USDC = 17_000.0
+        assert assign_tier(0.04) == "BELOW"
+        assert assign_tier(0.001) == "BELOW"
+        flash, _ = calculate_trade_size(68000.0, 0.04, 50_000.0)
+        assert flash == 0.0
 
 
 def test_tier_no_arb_at_negative():
