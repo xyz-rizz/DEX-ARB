@@ -77,11 +77,12 @@ def _print_banner() -> None:
 # ── Tier formatting ───────────────────────────────────────────────────────────
 
 _TIER_EMOJI = {
-    "PRIME":    "🔴 PRIME",
-    "GOOD":     "🟢 GOOD",
-    "MARGINAL": "🟡 MARGINAL",
-    "BELOW":    "⚪ BELOW",
-    "NO_ARB":   "❌ NO_ARB",
+    "PRIME":          "🔴 PRIME",
+    "GOOD":           "🟢 GOOD",
+    "MARGINAL":       "🟡 MARGINAL",
+    "BELOW":          "⚪ BELOW",
+    "NO_ARB":         "❌ NO_ARB",
+    "DEPTH_REJECTED": "🚫 DEPTH_REJECTED",
 }
 
 
@@ -104,13 +105,27 @@ def _log_scan_line(opp: ArbOpportunity, sim: SimResult = None) -> None:
 
     flash_k = f"${opp.flash_loan_usdc/1000:.0f}k" if opp.flash_loan_usdc >= 1000 else f"${opp.flash_loan_usdc:.0f}"
     sim_suffix = f" | sim_net=${sim.net_profit_usd:.2f}" if sim is not None else ""
+
+    # Cost breakdown suffix — show component costs when available
+    cost = getattr(opp, "cost", None)
+    if cost is not None:
+        cost_suffix = (
+            f" | gross={cost.gross_spread_pct:.4f}%"
+            f" lp={cost.lp_fee_buy_pct + cost.lp_fee_sell_pct:.4f}%"
+            f" impact={cost.price_impact_buy_pct + cost.price_impact_sell_pct:.4f}%"
+            f" gas={cost.gas_pct:.4f}%"
+            f" net={cost.net_spread_pct:.4f}%"
+        )
+    else:
+        cost_suffix = ""
+
     print(
         f"ARB_SCAN | {opp.pair} | "
         f"{opp.buy_venue[:6]}={opp.buy_price:.8g} "
         f"{opp.sell_venue[:6]}={opp.sell_price:.8g} | "
         f"spread={opp.gross_spread_pct:.4f}% net={opp.net_spread_pct:.4f}% | "
         f"flash={flash_k} | "
-        f"profit=${opp.estimated_profit_usdc:.2f}{sim_suffix} | {tier_str}"
+        f"profit=${opp.estimated_profit_usdc:.2f}{sim_suffix}{cost_suffix} | {tier_str}"
     )
 
 
@@ -235,6 +250,7 @@ def run_cycle(w3_read: Web3, w3_exec: Web3 = None, stats: CycleStats = None) -> 
             prices=prices,
             min_spread_pct=config.MIN_SPREAD_PCT,
             max_flash_usdc=config.MAX_FLASH_LOAN_USDC,
+            w3=w3_read,
         )
     except Exception as exc:
         logger.error("detect_all_opportunities failed: %s", exc)

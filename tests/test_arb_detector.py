@@ -8,11 +8,12 @@ from unittest.mock import MagicMock, patch
 
 from price_scanner import PriceQuote
 from arb_detector import (
-    ArbOpportunity, SimResult,
+    ArbOpportunity, SimResult, CostBreakdown,
     detect_opportunity, detect_all_opportunities,
     calculate_trade_size,
     _evaluate_pair, _evaluate_pair_best,
     assign_tier, simulate_arb, select_flash_provider,
+    compute_cost_breakdown, find_max_executable_size,
 )
 import config
 
@@ -469,3 +470,164 @@ def test_outlier_never_reaches_prime_tier():
             f"{o.pair} has tier=PRIME but gross_spread={o.gross_spread_pct:.2f}% "
             f"exceeds sanity cap={config.MAX_GROSS_SPREAD_PCT}%"
         )
+
+
+# ── CostBreakdown tests ───────────────────────────────────────────────────────
+
+def test_cost_breakdown_components_sum_to_net():
+    """net_spread_pct == gross - lp_buy - lp_sell - impact_buy - impact_sell - gas."""
+    cb = compute_cost_breakdown(
+        gross_spread_pct=0.50,
+        lp_fee_buy_pct=0.05,
+        lp_fee_sell_pct=0.05,
+        price_impact_buy_pct=0.10,
+        price_impact_sell_pct=0.08,
+        flash_loan_usdc=10_000.0,
+        gas_cost_usd=1.0,  # 0.01%
+    )
+    # gas_pct = 1.0/10000*100 = 0.01%
+    expected_net = 0.50 - 0.05 - 0.05 - 0.10 - 0.08 - 0.01 - 0.0
+    assert abs(cb.net_spread_pct - expected_net) < 1e-9
+    assert abs(cb.net_profit_usdc - 10_000.0 * expected_net / 100.0) < 1e-6
+
+
+def test_cost_breakdown_toshi_shows_real_cause():
+    """TOSHI/WETH: 0.1754% gross, 1%+1% LP fees → -1.8246% net. LP fees are culprit."""
+    cb = compute_cost_breakdown(
+        gross_spread_pct=0.1754,
+        lp_fee_buy_pct=1.0,    # fee=10000 tier → 1%
+        lp_fee_sell_pct=1.0,
+        price_impact_buy_pct=0.0,
+        price_impact_sell_pct=0.0,
+        flash_loan_usdc=17_000.0,
+        gas_cost_usd=0.0,
+    )
+    assert cb.lp_fee_buy_pct + cb.lp_fee_sell_pct == 2.0
+    assert abs(cb.net_spread_pct - (0.1754 - 2.0)) < 1e-9
+    assert cb.net_spread_pct < 0  # genuinely unprofitable
+
+
+def test_price_impact_included_in_net_not_separate():
+    """Non-zero price impact reduces net_spread_pct just like LP fees."""
+    no_impact = compute_cost_breakdown(0.30, 0.05, 0.05, 0.0, 0.0, 10_000.0, 0.0)
+    with_impact = compute_cost_breakdown(0.30, 0.05, 0.05, 0.05, 0.05, 10_000.0, 0.0)
+    assert with_impact.net_spread_pct < no_impact.net_spread_pct
+    diff = no_impact.net_spread_pct - with_impact.net_spread_pct
+    assert abs(diff - 0.10) < 1e-9  # exactly 0.05 + 0.05 removed
+
+
+def test_cost_breakdown_attached_to_opportunity():
+    """_evaluate_pair_best attaches a CostBreakdown to every returned opportunity."""
+    aero = _make_quote("aerodrome", 68297.04, fee_pct=0.0001)
+    uni  = _make_quote("uniswap",   68193.69, fee_pct=0.0005)
+    opp = _evaluate_pair_best(
+        "cbBTC/USDC", [aero, uni], min_spread_pct=0.0, max_flash_usdc=50_000
+    )
+    assert opp is not None
+    assert opp.cost is not None
+    assert isinstance(opp.cost, CostBreakdown)
+    # gross in CostBreakdown matches opp.gross_spread_pct
+    assert abs(opp.cost.gross_spread_pct - opp.gross_spread_pct) < 1e-9
+
+
+# ── Depth discovery / DEPTH_REJECTED tests ───────────────────────────────────
+
+def test_find_max_executable_size_rejects_thin_pool():
+    """When every test size causes >2% slippage on both legs, return 0.0."""
+    # pair_cfg matches "cbBTC/USDC" from config (USDC-denominated)
+    pair_cfg = next(p for p in config.PAIR_CONFIG if p["name"] == "cbBTC/USDC")
+    buy_dex_cfg  = {"type": "uniswap_v3", "router": "0x" + "0" * 40}
+    sell_dex_cfg = {"type": "uniswap_v3", "router": "0x" + "0" * 40}
+    w3 = MagicMock()
+
+    ref_price  = 68000.0
+    unit_size  = pair_cfg["unit_size"]
+    ref_amount = max(unit_size * 0.01, 10 ** (-pair_cfg["dec_in"]))
+
+    # ref quote at small amount returns clean price;
+    # any test-size quote returns 10% worse price → slippage > 2% → reject all.
+    def slippage_quote(w3_, cfg, dex_cfg, amount):
+        if amount <= ref_amount * 1.5:
+            return ref_price          # reference call — clean
+        return ref_price * 0.90       # test-size call — 10% slippage
+
+    with patch("price_scanner.quote_at_amount", side_effect=slippage_quote):
+        result = find_max_executable_size(
+            w3=w3,
+            pair_cfg=pair_cfg,
+            buy_dex_cfg=buy_dex_cfg,
+            sell_dex_cfg=sell_dex_cfg,
+            max_usdc=50_000.0,
+            slippage_tol=0.02,
+            buy_price=ref_price,
+        )
+    assert result == 0.0
+
+
+def test_find_max_executable_size_finds_correct_level():
+    """When slippage is acceptable at the smallest test fraction, return non-zero."""
+    pair_cfg = next(p for p in config.PAIR_CONFIG if p["name"] == "cbBTC/USDC")
+    buy_dex_cfg  = {"type": "uniswap_v3", "router": "0x" + "0" * 40}
+    sell_dex_cfg = {"type": "uniswap_v3", "router": "0x" + "0" * 40}
+    w3 = MagicMock()
+
+    ref_price  = 68000.0
+    unit_size  = pair_cfg["unit_size"]
+    ref_amount = max(unit_size * 0.01, 10 ** (-pair_cfg["dec_in"]))
+
+    def size_aware_quote(w3_, cfg, dex_cfg, amount):
+        if amount <= ref_amount * 1.5:
+            return ref_price          # reference call — clean
+        return ref_price * 0.99       # test-size call — 1% slippage (< 2% tol)
+
+    with patch("price_scanner.quote_at_amount", side_effect=size_aware_quote):
+        result = find_max_executable_size(
+            w3=w3,
+            pair_cfg=pair_cfg,
+            buy_dex_cfg=buy_dex_cfg,
+            sell_dex_cfg=sell_dex_cfg,
+            max_usdc=50_000.0,
+            slippage_tol=0.02,
+            buy_price=ref_price,
+        )
+    assert result > 0.0
+
+
+def test_depth_rejected_opp_has_zero_flash_and_not_profitable():
+    """DEPTH_REJECTED opp must have flash_loan_usdc=0 and is_profitable=False."""
+    aero = _make_quote("aerodrome", 68297.04, fee_pct=0.0001)
+    uni  = _make_quote("uniswap",   68193.69, fee_pct=0.0005)
+    w3 = MagicMock()
+
+    with patch("arb_detector.find_max_executable_size", return_value=0.0), \
+         patch("arb_detector._get_dex_cfg", return_value={"type": "uniswap_v3"}):
+        opp = _evaluate_pair_best(
+            "cbBTC/USDC", [aero, uni],
+            min_spread_pct=0.065, max_flash_usdc=50_000,
+            w3=w3,
+        )
+
+    assert opp is not None
+    assert opp.tier == "DEPTH_REJECTED"
+    assert opp.flash_loan_usdc == 0.0
+    assert opp.is_profitable is False
+
+
+def test_zero_flash_loan_never_creates_profitable_opp():
+    """An opp with flash_loan_usdc=0 must never show is_profitable=True."""
+    # Depth-rejected opp should have is_profitable=False regardless of spread
+    aero = _make_quote("aerodrome", 68300.0, fee_pct=0.0001)
+    uni  = _make_quote("uniswap",   68100.0, fee_pct=0.0001)
+    w3 = MagicMock()
+
+    with patch("arb_detector.find_max_executable_size", return_value=0.0), \
+         patch("arb_detector._get_dex_cfg", return_value={"type": "uniswap_v3"}):
+        opp = _evaluate_pair_best(
+            "cbBTC/USDC", [aero, uni],
+            min_spread_pct=0.0, max_flash_usdc=50_000,
+            w3=w3,
+        )
+
+    assert opp is not None
+    assert opp.is_profitable is False
+    assert opp.flash_loan_usdc == 0.0

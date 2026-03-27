@@ -625,6 +625,41 @@ def _quote_uniswap_v2(
         return None
 
 
+# ── Depth-probe helper ────────────────────────────────────────────────────────
+
+def quote_at_amount(
+    w3: Web3,
+    pair_cfg: dict,
+    dex_cfg: dict,
+    amount_in_human: float,
+) -> Optional[float]:
+    """
+    Return execution price (token_out per token_in) at a specific input amount.
+    Used by find_max_executable_size to probe pool depth at different trade sizes.
+
+    Internally re-uses the existing quote adapters by substituting unit_size
+    with the requested amount — same pool-lookup + quoter path, different amount.
+    Returns None if the DEX has no pool or the quoter fails.
+    """
+    if amount_in_human <= 0:
+        return None
+    modified_cfg = dict(pair_cfg)
+    modified_cfg["unit_size"] = amount_in_human
+    try:
+        dex_type = dex_cfg.get("type", "")
+        if dex_type == "slipstream":
+            q = _quote_slipstream(w3, modified_cfg, dex_cfg)
+        elif dex_type == "uniswap_v3":
+            q = _quote_uniswap_v3(w3, modified_cfg, dex_cfg)
+        elif dex_type == "uniswap_v2":
+            q = _quote_uniswap_v2(w3, modified_cfg, dex_cfg)
+        else:
+            return None
+        return q.price if q is not None and q.price > 0 else None
+    except Exception:
+        return None
+
+
 # ── Main price aggregator ─────────────────────────────────────────────────────
 
 def _get_quotes_for_pair(w3: Web3, pair_cfg: dict) -> List[PriceQuote]:

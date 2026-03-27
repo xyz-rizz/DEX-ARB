@@ -58,6 +58,51 @@ _QUOTER_V2_ABI = [
 
 # ── Tier assignment ───────────────────────────────────────────────────────────
 
+# ── Cost breakdown ────────────────────────────────────────────────────────────
+
+@dataclass
+class CostBreakdown:
+    """Full cost decomposition for one arb opportunity."""
+    gross_spread_pct: float        # raw price difference (sell - buy) / buy
+    lp_fee_buy_pct: float          # LP fee on buy leg (e.g. 0.05 for 0.05%)
+    lp_fee_sell_pct: float         # LP fee on sell leg
+    price_impact_buy_pct: float    # slippage at flash size on buy leg (0 at scan time)
+    price_impact_sell_pct: float   # slippage at flash size on sell leg (0 at scan time)
+    gas_pct: float                 # estimated gas as % of notional
+    flash_fee_pct: float           # flash loan fee (0% Morpho, 0% Balancer)
+    net_spread_pct: float          # gross minus all costs
+    net_profit_usdc: float         # net_spread * notional / 100
+
+
+def compute_cost_breakdown(
+    gross_spread_pct: float,
+    lp_fee_buy_pct: float,
+    lp_fee_sell_pct: float,
+    price_impact_buy_pct: float,
+    price_impact_sell_pct: float,
+    flash_loan_usdc: float,
+    gas_cost_usd: float,
+) -> CostBreakdown:
+    """Compute full cost breakdown. All percentage inputs are in percent (not fractions)."""
+    gas_pct = (gas_cost_usd / flash_loan_usdc * 100.0) if flash_loan_usdc > 0 else 0.0
+    flash_fee_pct = 0.0  # Morpho and Balancer are both 0%
+    net = (gross_spread_pct
+           - lp_fee_buy_pct - lp_fee_sell_pct
+           - price_impact_buy_pct - price_impact_sell_pct
+           - gas_pct - flash_fee_pct)
+    return CostBreakdown(
+        gross_spread_pct=gross_spread_pct,
+        lp_fee_buy_pct=lp_fee_buy_pct,
+        lp_fee_sell_pct=lp_fee_sell_pct,
+        price_impact_buy_pct=price_impact_buy_pct,
+        price_impact_sell_pct=price_impact_sell_pct,
+        gas_pct=gas_pct,
+        flash_fee_pct=flash_fee_pct,
+        net_spread_pct=net,
+        net_profit_usdc=flash_loan_usdc * net / 100.0,
+    )
+
+
 def assign_tier(net_spread_pct: float) -> str:
     """
     Classify net spread into execution tier.
@@ -95,8 +140,9 @@ class ArbOpportunity:
     estimated_profit_usdc: float
     is_profitable: bool
     timestamp: float
-    tier: str = "BELOW"         # PRIME / GOOD / MARGINAL / BELOW / NO_ARB
+    tier: str = "BELOW"         # PRIME / GOOD / MARGINAL / BELOW / NO_ARB / DEPTH_REJECTED
     flash_provider: str = ""    # "Morpho" or "Balancer" or ""
+    cost: Optional[CostBreakdown] = None  # full cost breakdown (None when no w3 available)
 
     def __repr__(self) -> str:
         return (
@@ -184,6 +230,83 @@ def select_flash_provider(w3: Web3, required_usdc: float) -> str:
     return ""
 
 
+# ── Depth discovery ───────────────────────────────────────────────────────────
+
+def _get_dex_cfg(venue_name: str) -> Optional[dict]:
+    """Return DEX_CONFIG entry matching venue_name, or None."""
+    for dex in config.DEX_CONFIG:
+        if dex["name"] == venue_name:
+            return dex
+    return None
+
+
+def find_max_executable_size(
+    w3: Web3,
+    pair_cfg: dict,
+    buy_dex_cfg: dict,
+    sell_dex_cfg: dict,
+    max_usdc: float,
+    slippage_tol: float,
+    buy_price: float,
+) -> float:
+    """
+    Step-down ladder to find the largest flash loan size (USD) where both the
+    buy and sell legs stay within slippage_tol.
+
+    Probes: max_usdc × [1.0, 0.5, 0.25, 0.1, 0.05]
+    Returns the first size that passes, or 0.0 if none do.
+
+    buy_price: token_out per token_in at unit_size (from scanner).
+    For WETH-denominated pairs, buy_price is in WETH/token.
+    """
+    from price_scanner import quote_at_amount
+
+    unit_size = pair_cfg["unit_size"]
+    token_out = pair_cfg["token_out"]
+    is_weth_pair = token_out.lower() == config.WETH_ADDRESS.lower()
+
+    # Rough ETH price for USD↔WETH conversion (only needed for WETH pairs)
+    eth_price = 3500.0
+    if is_weth_pair:
+        try:
+            eth_price = _estimate_eth_price(w3)
+        except Exception:
+            pass
+
+    # Reference price at 1% of unit_size (tiny trade, essentially no impact)
+    ref_amount = max(unit_size * 0.01, 10 ** (-pair_cfg["dec_in"]))
+    buy_ref  = quote_at_amount(w3, pair_cfg, buy_dex_cfg,  ref_amount)
+    sell_ref = quote_at_amount(w3, pair_cfg, sell_dex_cfg, ref_amount)
+    if not buy_ref or not sell_ref:
+        return 0.0  # Cannot get reference price — pool missing or illiquid
+
+    # Convert max_usdc (USD) to token_in amount using reference buy price
+    if is_weth_pair:
+        max_token_in = (max_usdc / eth_price) / buy_ref   # USD→WETH→token_in
+    else:
+        max_token_in = max_usdc / buy_ref                  # USD→USDC→token_in
+
+    for frac in [1.0, 0.5, 0.25, 0.1, 0.05]:
+        test_token_in = max_token_in * frac
+
+        buy_actual  = quote_at_amount(w3, pair_cfg, buy_dex_cfg,  test_token_in)
+        sell_actual = quote_at_amount(w3, pair_cfg, sell_dex_cfg, test_token_in)
+        if not buy_actual or not sell_actual:
+            continue
+
+        buy_slip  = abs(buy_ref  - buy_actual)  / buy_ref  if buy_ref  > 0 else 1.0
+        sell_slip = abs(sell_ref - sell_actual) / sell_ref if sell_ref > 0 else 1.0
+
+        if buy_slip <= slippage_tol and sell_slip <= slippage_tol:
+            # Convert token_in back to USD
+            if is_weth_pair:
+                return test_token_in * buy_ref * eth_price   # token_in→WETH→USD
+            else:
+                return test_token_in * buy_ref               # token_in→USDC
+
+    return 0.0  # No size within tolerance
+
+
 # ── Core pair evaluator ───────────────────────────────────────────────────────
 
 def _evaluate_pair_best(
@@ -191,10 +314,15 @@ def _evaluate_pair_best(
     quotes: List[PriceQuote],
     min_spread_pct: float,
     max_flash_usdc: float,
+    w3: Optional[Web3] = None,
 ) -> Optional["ArbOpportunity"]:
     """
     Find best arb across a list of DEX quotes for one pair.
     Selects cheapest buy and priciest sell across ALL DEXes.
+
+    When w3 is provided, runs depth discovery via find_max_executable_size
+    before assigning flash_loan_usdc. Profitable opps that cannot be sized
+    within MAX_SLIPPAGE_PER_LEG at any test level return tier=DEPTH_REJECTED.
     """
     valid = [q for q in quotes if q.price > 0]
     if len(valid) < 2:
@@ -215,10 +343,6 @@ def _evaluate_pair_best(
     net_spread_pct   = gross_spread_pct - total_fee_pct
 
     # Sanity cap: reject absurdly large spreads before tier assignment.
-    # Root cause: Aerodrome Slipstream uses slot0 spot price (zero slippage)
-    # while PancakeSwap V3 uses QuoterV2 execution quote (includes slippage).
-    # A thin pool (e.g. BRETT/WETH unit_size=100k) produces apparent spreads
-    # >2000% — physically impossible between two liquid DEXes on the same chain.
     if gross_spread_pct > config.MAX_GROSS_SPREAD_PCT:
         logger.debug(
             "OUTLIER_REJECTED | %s | gross_spread=%.4f%% > sanity_cap=%.1f%% | "
@@ -228,7 +352,7 @@ def _evaluate_pair_best(
         )
         return None
 
-    tier         = assign_tier(net_spread_pct)
+    tier          = assign_tier(net_spread_pct)
     is_profitable = tier in ("PRIME", "GOOD", "MARGINAL")
 
     flash_loan_usdc, _ = calculate_trade_size(
@@ -237,7 +361,69 @@ def _evaluate_pair_best(
         max_usdc=max_flash_usdc,
     )
 
-    # Profit = flash_loan * net_spread / 100
+    # Compute cost breakdown at scan size (price impact ≈ 0 at unit_size)
+    # lp_fee_pct stored as fraction → convert to percent for CostBreakdown
+    cost = compute_cost_breakdown(
+        gross_spread_pct=gross_spread_pct,
+        lp_fee_buy_pct=buy_quote.fee_pct * 100.0,
+        lp_fee_sell_pct=sell_quote.fee_pct * 100.0,
+        price_impact_buy_pct=0.0,   # unknown at scan time (unit_size is tiny)
+        price_impact_sell_pct=0.0,
+        flash_loan_usdc=flash_loan_usdc,
+        gas_cost_usd=0.50,          # conservative $0.50 gas estimate
+    )
+
+    # Depth discovery: probe pool depth when w3 available and opp is profitable
+    if is_profitable and w3 is not None:
+        pair_cfg     = next((p for p in config.PAIR_CONFIG if p["name"] == pair), None)
+        buy_dex_cfg  = _get_dex_cfg(buy_quote.venue)
+        sell_dex_cfg = _get_dex_cfg(sell_quote.venue)
+
+        if pair_cfg and buy_dex_cfg and sell_dex_cfg:
+            max_size = find_max_executable_size(
+                w3=w3,
+                pair_cfg=pair_cfg,
+                buy_dex_cfg=buy_dex_cfg,
+                sell_dex_cfg=sell_dex_cfg,
+                max_usdc=max_flash_usdc,
+                slippage_tol=config.MAX_SLIPPAGE_PER_LEG,
+                buy_price=buy_price,
+            )
+            if max_size == 0.0:
+                logger.debug(
+                    "DEPTH_REJECTED | %s | buy=%s sell=%s | "
+                    "no executable size within %.0f%% slippage",
+                    pair, buy_quote.venue, sell_quote.venue,
+                    config.MAX_SLIPPAGE_PER_LEG * 100,
+                )
+                return ArbOpportunity(
+                    pair=pair,
+                    buy_venue=buy_quote.venue,
+                    sell_venue=sell_quote.venue,
+                    buy_price=buy_price,
+                    sell_price=sell_price,
+                    gross_spread_pct=gross_spread_pct,
+                    total_fee_pct=total_fee_pct,
+                    net_spread_pct=net_spread_pct,
+                    flash_loan_usdc=0.0,
+                    estimated_profit_usdc=0.0,
+                    is_profitable=False,
+                    timestamp=time.time(),
+                    tier="DEPTH_REJECTED",
+                    cost=cost,
+                )
+            # Use depth-discovered size (may be smaller than tier default)
+            flash_loan_usdc = max_size
+            cost = compute_cost_breakdown(
+                gross_spread_pct=gross_spread_pct,
+                lp_fee_buy_pct=buy_quote.fee_pct * 100.0,
+                lp_fee_sell_pct=sell_quote.fee_pct * 100.0,
+                price_impact_buy_pct=0.0,
+                price_impact_sell_pct=0.0,
+                flash_loan_usdc=flash_loan_usdc,
+                gas_cost_usd=0.50,
+            )
+
     estimated_profit_usdc = flash_loan_usdc * (net_spread_pct / 100.0)
 
     return ArbOpportunity(
@@ -254,6 +440,7 @@ def _evaluate_pair_best(
         is_profitable=is_profitable,
         timestamp=time.time(),
         tier=tier,
+        cost=cost,
     )
 
 
@@ -277,18 +464,21 @@ def detect_all_opportunities(
     prices: dict,
     min_spread_pct: float,
     max_flash_usdc: float,
+    w3: Optional[Web3] = None,
 ) -> List[ArbOpportunity]:
     """
     Scan all pairs and return ALL opportunities (sorted by net profit descending).
     Includes below-threshold opportunities (is_profitable=False) so caller can log them.
+    DEPTH_REJECTED opps are included so the scan log shows them.
 
     prices format: {pair_name: [PriceQuote, ...]}  OR  {pair_name: (quote1, quote2)}
+    w3: when provided, enables depth discovery via find_max_executable_size.
     """
     results: List[ArbOpportunity] = []
 
     for pair, quotes_raw in prices.items():
         quotes = list(quotes_raw)  # handle both tuple (legacy) and list (new)
-        opp = _evaluate_pair_best(pair, quotes, min_spread_pct, max_flash_usdc)
+        opp = _evaluate_pair_best(pair, quotes, min_spread_pct, max_flash_usdc, w3)
         if opp is not None:
             results.append(opp)
 
@@ -399,7 +589,20 @@ def simulate_arb(w3: Web3, opp: ArbOpportunity) -> SimResult:
     intermediate = token_in
     inter_dec    = dec_in
 
-    usdc_raw = int(usdc_in * (10 ** borrow_dec))
+    # Convert USD flash loan amount to borrow-token units.
+    # For WETH pairs (borrow_dec=18) we must divide by ETH price first;
+    # otherwise 17000 * 1e18 = 17,000 WETH raw (~$35M) instead of ~8.5 WETH.
+    is_weth_borrow = borrow_token.lower() == config.WETH_ADDRESS.lower()
+    if is_weth_borrow:
+        eth_price_sim = _estimate_eth_price(w3)
+        if eth_price_sim <= 0:
+            eth_price_sim = 2000.0  # defensive fallback
+        borrow_amount = usdc_in / eth_price_sim   # USD → WETH
+    else:
+        eth_price_sim = 0.0
+        borrow_amount = usdc_in                    # USD → USDC (1:1)
+
+    borrow_raw = int(borrow_amount * (10 ** borrow_dec))
 
     # Buy leg simulation
     try:
@@ -414,17 +617,17 @@ def simulate_arb(w3: Web3, opp: ArbOpportunity) -> SimResult:
             result = q.functions.quoteExactInputSingle({
                 "tokenIn":           Web3.to_checksum_address(borrow_token),
                 "tokenOut":          Web3.to_checksum_address(intermediate),
-                "amountIn":          usdc_raw,
+                "amountIn":          borrow_raw,
                 "fee":               fee,
                 "sqrtPriceLimitX96": 0,
             }).call()
             token_amount = result[0] / (10 ** inter_dec)
         else:
             # No quoter (Aerodrome Slipstream / vAMM) — use scanner buy price
-            token_amount = usdc_in / opp.buy_price if opp.buy_price > 0 else 0.0
+            token_amount = borrow_amount / opp.buy_price if opp.buy_price > 0 else 0.0
     except Exception as e:
         logger.debug("sim buy leg failed pair=%s dex=%s: %s", opp.pair, opp.buy_venue, e)
-        token_amount = usdc_in / opp.buy_price if opp.buy_price > 0 else 0.0
+        token_amount = borrow_amount / opp.buy_price if opp.buy_price > 0 else 0.0
 
     if token_amount == 0:
         return SimResult(
@@ -469,32 +672,37 @@ def simulate_arb(w3: Web3, opp: ArbOpportunity) -> SimResult:
         gas_cost_usd = 0.5  # fallback: 50 cents
 
     # Step 4: Slippage check
-    # Expected token from buy at scanner price
-    expected_token = usdc_in / opp.buy_price if opp.buy_price > 0 else 1.0
+    # Expected token from buy at scanner price — use borrow_amount (not usdc_in)
+    # so WETH pairs get WETH/buy_price instead of USD/buy_price.
+    expected_token = borrow_amount / opp.buy_price if opp.buy_price > 0 else 1.0
     buy_slippage = abs(token_amount - expected_token) / expected_token if expected_token > 0 else 0
+
+    # For P&L, convert sell proceeds back to USD.
+    usdc_out_usd = usdc_out * eth_price_sim if is_weth_borrow else usdc_out
+
     if buy_slippage > 0.02:
         return SimResult(
             buy_dex=opp.buy_venue, sell_dex=opp.sell_venue,
-            token_amount=token_amount, usdc_in=usdc_in, usdc_out=usdc_out,
-            gross_profit_usd=usdc_out - usdc_in, gas_cost_usd=gas_cost_usd,
-            net_profit_usd=usdc_out - usdc_in - gas_cost_usd,
+            token_amount=token_amount, usdc_in=usdc_in, usdc_out=usdc_out_usd,
+            gross_profit_usd=usdc_out_usd - usdc_in, gas_cost_usd=gas_cost_usd,
+            net_profit_usd=usdc_out_usd - usdc_in - gas_cost_usd,
             flash_provider=flash_provider, is_executable=False,
             rejection_reason=f"buy_slippage_too_high:{buy_slippage*100:.2f}%",
         )
 
-    expected_usdc_out = token_amount * opp.sell_price
-    sell_slippage = abs(usdc_out - expected_usdc_out) / expected_usdc_out if expected_usdc_out > 0 else 0
+    expected_borrow_out = token_amount * opp.sell_price  # in borrow-token units
+    sell_slippage = abs(usdc_out - expected_borrow_out) / expected_borrow_out if expected_borrow_out > 0 else 0
     if sell_slippage > 0.02:
         return SimResult(
             buy_dex=opp.buy_venue, sell_dex=opp.sell_venue,
-            token_amount=token_amount, usdc_in=usdc_in, usdc_out=usdc_out,
-            gross_profit_usd=usdc_out - usdc_in, gas_cost_usd=gas_cost_usd,
-            net_profit_usd=usdc_out - usdc_in - gas_cost_usd,
+            token_amount=token_amount, usdc_in=usdc_in, usdc_out=usdc_out_usd,
+            gross_profit_usd=usdc_out_usd - usdc_in, gas_cost_usd=gas_cost_usd,
+            net_profit_usd=usdc_out_usd - usdc_in - gas_cost_usd,
             flash_provider=flash_provider, is_executable=False,
             rejection_reason=f"sell_slippage_too_high:{sell_slippage*100:.2f}%",
         )
 
-    gross_profit = usdc_out - usdc_in
+    gross_profit = usdc_out_usd - usdc_in
     net_profit   = gross_profit - gas_cost_usd
     is_exec      = net_profit >= config.MIN_NET_PROFIT_USD
 
@@ -503,7 +711,7 @@ def simulate_arb(w3: Web3, opp: ArbOpportunity) -> SimResult:
         sell_dex=opp.sell_venue,
         token_amount=token_amount,
         usdc_in=usdc_in,
-        usdc_out=usdc_out,
+        usdc_out=usdc_out_usd,
         gross_profit_usd=gross_profit,
         gas_cost_usd=gas_cost_usd,
         net_profit_usd=net_profit,

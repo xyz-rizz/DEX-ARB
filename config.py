@@ -39,6 +39,12 @@ TIER_PRIME_PCT: float    = 0.15   # PRIME: execute at max size ($50k)
 TIER_GOOD_PCT: float     = 0.10   # GOOD: execute at normal size ($34k)
 TIER_MARGINAL_PCT: float = 0.065  # MARGINAL: execute at half size ($17k) = MIN_SPREAD_PCT
 
+# ── Depth discovery ───────────────────────────────────────────────────────────
+# Maximum slippage allowed on each leg during depth probing.
+# If neither buy nor sell leg stays within this at any test size, the opp is
+# classified as DEPTH_REJECTED before simulation.
+MAX_SLIPPAGE_PER_LEG: float = float(os.getenv("MAX_SLIPPAGE_PER_LEG", "0.02"))  # 2%
+
 # ── Execution readiness ───────────────────────────────────────────────────────
 # True only when ARB_EXECUTOR_ADDRESS is non-empty (contract deployed).
 # Used by should_execute() and startup banner. Evaluated at import time.
