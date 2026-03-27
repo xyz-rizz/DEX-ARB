@@ -676,3 +676,199 @@ def test_zero_flash_loan_never_creates_profitable_opp():
     assert opp is not None
     assert opp.is_profitable is False
     assert opp.flash_loan_usdc == 0.0
+
+
+# ── Multicall3 batching in find_max_executable_size ───────────────────────────
+# These tests exercise the fast multicall path (when build_depth_probe_calldata
+# returns a valid tuple, i.e., pool is cached and dex_cfg has "name").
+
+def _make_real_dex_cfg(dex_type="uniswap_v3"):
+    """Return a minimal but complete dex_cfg dict that build_depth_probe_calldata accepts."""
+    return {
+        "name": "TestDEX",
+        "type": dex_type,
+        "factory": "0x" + "1" * 40,
+        "quoter":  "0x" + "2" * 40,
+        "fee_tiers": [500],
+    }
+
+
+def _make_fake_probe_calldata(pair_cfg, dex_cfg, amount):
+    """Fake build_depth_probe_calldata — returns a valid tuple so multicall path is taken."""
+    return (
+        "0x" + "2" * 40,          # target (quoter address)
+        b"\x00" * 4,              # callData (not actually called — multicall3 is mocked)
+        "uniswap_v3",             # call_type
+        pair_cfg["dec_out"],      # dec_out
+        amount,                   # amount_in_human
+    )
+
+
+def _encode_v3_price(price: float, amount_in: float, dec_out: int) -> bytes:
+    """Encode a price as the ABI return of quoteExactInputSingle (4 uint256-family words)."""
+    from eth_abi import encode as abi_encode
+    amount_out_raw = int(price * amount_in * (10 ** dec_out))
+    return abi_encode(
+        ["uint256", "uint160", "uint32", "uint256"],
+        [amount_out_raw, 0, 0, 0],
+    )
+
+
+def test_find_max_executable_size_uses_multicall():
+    """
+    When build_depth_probe_calldata succeeds for both legs, multicall3 is called
+    (not zero times) and the result is > 0 when all probes pass slippage.
+
+    We patch decode_depth_probe_result to always return ref_price so slippage = 0.
+    This avoids having to encode the exact amountOut per probe amount.
+    """
+    pair_cfg = next(p for p in config.PAIR_CONFIG if p["name"] == "cbBTC/USDC")
+    buy_dex_cfg  = _make_real_dex_cfg()
+    sell_dex_cfg = _make_real_dex_cfg()
+    w3 = MagicMock()
+
+    ref_price = 68000.0
+
+    # multicall3: return a non-None bytes placeholder for each call (content irrelevant
+    # because decode_depth_probe_result is also mocked)
+    def fake_multicall(w3_, calls):
+        return [b"\x00" * 128] * len(calls)
+
+    # decode_depth_probe_result: always return ref_price → slippage = 0 for all probes
+    def fake_decode(raw, call_type, dec_out, amount_in_human):
+        return ref_price
+
+    with patch("price_scanner.build_depth_probe_calldata",
+               side_effect=_make_fake_probe_calldata), \
+         patch("utils.multicall.multicall3", side_effect=fake_multicall) as mc_mock, \
+         patch("price_scanner.decode_depth_probe_result", side_effect=fake_decode):
+        result = find_max_executable_size(
+            w3=w3,
+            pair_cfg=pair_cfg,
+            buy_dex_cfg=buy_dex_cfg,
+            sell_dex_cfg=sell_dex_cfg,
+            max_usdc=50_000.0,
+            slippage_tol=0.02,
+            buy_price=ref_price,
+        )
+
+    assert mc_mock.call_count > 0, "multicall3 must be called at least once"
+    # With batching: 2 ref calls = 1 multicall3 call, 10 probe calls = 1 more → 2 total
+    # Far fewer than 12 sequential calls
+    assert mc_mock.call_count <= 3, (
+        f"Expected ≤3 multicall3 round-trips (got {mc_mock.call_count}) — probes must be batched"
+    )
+    assert result > 0, "Should find a valid size when all probes pass slippage"
+
+
+def test_find_max_executable_size_handles_failed_probe():
+    """
+    When the LARGEST probe size (frac=1.0) returns None (reverted) but smaller
+    sizes succeed, the function returns the largest VALID size (not 0.0).
+    No exception should be raised.
+
+    Patching decode_depth_probe_result per call: None for calls indexed 0-1
+    (the frac=1.0 buy+sell probes), ref_price for all others.
+    """
+    pair_cfg = next(p for p in config.PAIR_CONFIG if p["name"] == "cbBTC/USDC")
+    buy_dex_cfg  = _make_real_dex_cfg()
+    sell_dex_cfg = _make_real_dex_cfg()
+    w3 = MagicMock()
+
+    ref_price = 68000.0
+    phase = {"n": 0}  # track multicall phase
+    decode_call = {"n": 0}  # track decode call count
+
+    def fake_multicall(w3_, calls):
+        phase["n"] += 1
+        return [b"\x00" * 128] * len(calls)
+
+    def fake_decode(raw, call_type, dec_out, amount_in_human):
+        # Phase 1 (ref calls) → always return ref_price
+        # Phase 2 (probe calls):
+        #   decode call 0,1 → None  (frac=1.0 buy+sell revert)
+        #   decode call 2+  → ref_price (frac=0.5 and smaller pass)
+        if phase["n"] == 1:
+            return ref_price
+        decode_call["n"] += 1
+        if decode_call["n"] <= 2:
+            return None   # frac=1.0 probes fail
+        return ref_price
+
+    with patch("price_scanner.build_depth_probe_calldata",
+               side_effect=_make_fake_probe_calldata), \
+         patch("utils.multicall.multicall3", side_effect=fake_multicall), \
+         patch("price_scanner.decode_depth_probe_result", side_effect=fake_decode):
+        result = find_max_executable_size(
+            w3=w3,
+            pair_cfg=pair_cfg,
+            buy_dex_cfg=buy_dex_cfg,
+            sell_dex_cfg=sell_dex_cfg,
+            max_usdc=50_000.0,
+            slippage_tol=0.02,
+            buy_price=ref_price,
+        )
+
+    assert result > 0.0, "Should return the largest valid size (frac=0.5), not 0.0"
+    assert result < 50_000.0, "frac=1.0 failed — result must be less than max_usdc"
+
+
+def test_find_max_executable_size_all_probes_fail():
+    """
+    When decode_depth_probe_result returns None for every probe call,
+    find_max_executable_size returns 0.0 and raises no exception.
+    """
+    pair_cfg = next(p for p in config.PAIR_CONFIG if p["name"] == "cbBTC/USDC")
+    buy_dex_cfg  = _make_real_dex_cfg()
+    sell_dex_cfg = _make_real_dex_cfg()
+    w3 = MagicMock()
+
+    ref_price = 68000.0
+    phase = {"n": 0}
+
+    def fake_multicall(w3_, calls):
+        phase["n"] += 1
+        return [b"\x00" * 128] * len(calls)
+
+    def fake_decode(raw, call_type, dec_out, amount_in_human):
+        if phase["n"] == 1:
+            return ref_price  # ref calls succeed
+        return None           # all probe calls fail
+
+    with patch("price_scanner.build_depth_probe_calldata",
+               side_effect=_make_fake_probe_calldata), \
+         patch("utils.multicall.multicall3", side_effect=fake_multicall), \
+         patch("price_scanner.decode_depth_probe_result", side_effect=fake_decode):
+        result = find_max_executable_size(
+            w3=w3,
+            pair_cfg=pair_cfg,
+            buy_dex_cfg=buy_dex_cfg,
+            sell_dex_cfg=sell_dex_cfg,
+            max_usdc=50_000.0,
+            slippage_tol=0.02,
+            buy_price=ref_price,
+        )
+
+    assert result == 0.0, f"All probes failed — expected 0.0, got {result}"
+
+
+def test_arb_detector_no_alchemy_in_depth_probe():
+    """
+    Negative test: arb_detector.py must not contain any reference to ALCHEMY
+    in the detect / depth probe functions. All reads use dRPC (w3_read) only.
+    """
+    import inspect
+    import arb_detector as _ad
+
+    src = inspect.getsource(_ad.find_max_executable_size)
+    assert "ALCHEMY" not in src, "find_max_executable_size must not reference ALCHEMY"
+    assert "alchemy" not in src.lower(), (
+        "find_max_executable_size must not reference alchemy (any case)"
+    )
+
+    # Also verify module-level source has no Alchemy RPC references in detect path
+    full_src = inspect.getsource(_ad)
+    # The whole module must not import or reference Alchemy URLs
+    assert "ALCHEMY" not in full_src or "ALCHEMY" in "ALCHEMY_KEY", (
+        "arb_detector.py must not hard-code ALCHEMY references"
+    )

@@ -682,6 +682,112 @@ def quote_at_amount(
         return None
 
 
+def build_depth_probe_calldata(
+    pair_cfg: dict,
+    dex_cfg: dict,
+    amount_in_human: float,
+) -> Optional[tuple]:
+    """
+    Build raw ABI calldata for a single depth-probe quoter call.
+
+    Returns (target_address, calldata_bytes, call_type_str, dec_out, amount_in_human)
+    or None if the DEX type is unsupported or no pool is cached.
+
+    call_type_str is "slipstream", "uniswap_v3", or "uniswap_v2".
+    Uses the same selectors and abi_encode as _batch_all_quotes — identical encoding.
+
+    NOTE: This function does NOT look up pool addresses itself (pool address is only
+    needed for v2 target — for v3/slipstream the target is the quoter address).
+    For v2, the pool address must be in _pool_cache.
+    """
+    if amount_in_human <= 0:
+        return None
+
+    token_in  = Web3.to_checksum_address(pair_cfg["token_in"])
+    token_out = Web3.to_checksum_address(pair_cfg["token_out"])
+    dec_in    = pair_cfg["dec_in"]
+    dec_out   = pair_cfg["dec_out"]
+    pair_name = pair_cfg["name"]
+    dex_type  = dex_cfg.get("type", "")
+    dex_name  = dex_cfg.get("name", "")
+    if not dex_name:
+        return None  # Cannot look up pool cache without DEX name
+    amount_in = int(amount_in_human * (10 ** dec_in))
+
+    if dex_type == "slipstream":
+        quoter = Web3.to_checksum_address(
+            dex_cfg.get("quoter") or config.AERODROME_SLIPSTREAM_QUOTER
+        )
+        # Pick the first cached tick_spacing that has a valid pool
+        ts_to_use = None
+        for ts in dex_cfg.get("tick_spacings", [1, 50, 100, 200]):
+            if _pool_cache.get((pair_name, dex_name, ts)) is not None:
+                ts_to_use = ts
+                break
+        if ts_to_use is None:
+            return None
+        cd = _SEL_QUOTE_SLIP + abi_encode(
+            ["(address,address,uint256,int24,uint160)"],
+            [(token_in, token_out, amount_in, ts_to_use, 0)],
+        )
+        return (quoter, cd, "slipstream", dec_out, amount_in_human)
+
+    elif dex_type == "uniswap_v3":
+        quoter_raw = dex_cfg.get("quoter", "")
+        if not quoter_raw:
+            return None
+        quoter = Web3.to_checksum_address(quoter_raw)
+        # Pick the first cached fee tier that has a valid pool
+        fee_to_use = None
+        for fee in dex_cfg.get("fee_tiers", [500]):
+            if _pool_cache.get((pair_name, dex_name, fee)) is not None:
+                fee_to_use = fee
+                break
+        if fee_to_use is None:
+            return None
+        cd = _SEL_QUOTE_V3 + abi_encode(
+            ["(address,address,uint256,uint24,uint160)"],
+            [(token_in, token_out, amount_in, fee_to_use, 0)],
+        )
+        return (quoter, cd, "uniswap_v3", dec_out, amount_in_human)
+
+    elif dex_type == "uniswap_v2":
+        pool_addr = _pool_cache.get((pair_name, dex_name, "v2"))
+        if pool_addr is None:
+            return None
+        cd = _SEL_AMOUNT_OUT + abi_encode(
+            ["uint256", "address"], [amount_in, token_in]
+        )
+        return (Web3.to_checksum_address(pool_addr), cd, "uniswap_v2", dec_out, amount_in_human)
+
+    return None
+
+
+def decode_depth_probe_result(raw: Optional[bytes], call_type: str, dec_out: int,
+                               amount_in_human: float) -> Optional[float]:
+    """
+    Decode a raw multicall3 return value from a depth-probe quoter call.
+
+    Returns price (token_out per token_in) or None if reverted/zero.
+    Uses the same abi_decode as _batch_all_quotes — identical decoding.
+    """
+    if raw is None:
+        return None
+    try:
+        if call_type in ("slipstream", "uniswap_v3"):
+            amount_out_raw = abi_decode(
+                ["uint256", "uint160", "uint32", "uint256"], raw
+            )[0]
+        else:  # uniswap_v2
+            amount_out_raw = abi_decode(["uint256"], raw)[0]
+        if amount_out_raw == 0 or amount_in_human <= 0:
+            return None
+        price = (amount_out_raw / (10 ** dec_out)) / amount_in_human
+        return price if price > 0 else None
+    except Exception:
+        return None
+
+
 # ── Multicall3 batch helpers ──────────────────────────────────────────────────
 
 def _populate_pool_cache(w3: Web3) -> None:

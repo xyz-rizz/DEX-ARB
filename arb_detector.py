@@ -258,8 +258,16 @@ def find_max_executable_size(
 
     buy_price: token_out per token_in at unit_size (from scanner).
     For WETH-denominated pairs, buy_price is in WETH/token.
+
+    All quoter calls are batched via multicall3 (one round-trip for all probes
+    instead of 10+ sequential calls). Uses w3_read (dRPC) only.
     """
-    from price_scanner import quote_at_amount
+    from price_scanner import (
+        quote_at_amount,
+        build_depth_probe_calldata,
+        decode_depth_probe_result,
+    )
+    from utils.multicall import multicall3
 
     unit_size = pair_cfg["unit_size"]
     token_out = pair_cfg["token_out"]
@@ -275,22 +283,129 @@ def find_max_executable_size(
 
     # Reference price at 1% of unit_size (tiny trade, essentially no impact)
     ref_amount = max(unit_size * 0.01, 10 ** (-pair_cfg["dec_in"]))
-    buy_ref  = quote_at_amount(w3, pair_cfg, buy_dex_cfg,  ref_amount)
-    sell_ref = quote_at_amount(w3, pair_cfg, sell_dex_cfg, ref_amount)
+
+    # ── Phase 1: batch the 2 reference calls + (5 × 2) probe calls = 12 calls ──
+    # Build calldata for reference calls
+    probe_specs: list = []  # list of (label, amount_in_human, dex_side)
+    mc_calls: list = []     # list of {target, callData}
+    mc_meta: list = []      # parallel: (label, call_type, dec_out, amount_in_human)
+
+    for side, dex_cfg_arg, label in [
+        ("buy_ref",  buy_dex_cfg,  "buy_ref"),
+        ("sell_ref", sell_dex_cfg, "sell_ref"),
+    ]:
+        info = build_depth_probe_calldata(pair_cfg, dex_cfg_arg, ref_amount)
+        if info is None:
+            # Pool not cached — fall back to sequential quote_at_amount for ref
+            buy_ref  = quote_at_amount(w3, pair_cfg, buy_dex_cfg,  ref_amount)
+            sell_ref = quote_at_amount(w3, pair_cfg, sell_dex_cfg, ref_amount)
+            if not buy_ref or not sell_ref:
+                return 0.0
+            # Build probe calls sequentially (fallback path)
+            if is_weth_pair:
+                max_token_in = (max_usdc / eth_price) / buy_ref
+            else:
+                max_token_in = max_usdc / buy_ref
+            for frac in [1.0, 0.5, 0.25, 0.1, 0.05]:
+                test_token_in = max_token_in * frac
+                buy_a  = quote_at_amount(w3, pair_cfg, buy_dex_cfg,  test_token_in)
+                sell_a = quote_at_amount(w3, pair_cfg, sell_dex_cfg, test_token_in)
+                if not buy_a or not sell_a:
+                    continue
+                buy_slip  = abs(buy_ref - buy_a)  / buy_ref  if buy_ref  > 0 else 1.0
+                sell_slip = abs(sell_ref - sell_a) / sell_ref if sell_ref > 0 else 1.0
+                if buy_slip <= slippage_tol and sell_slip <= slippage_tol:
+                    if is_weth_pair:
+                        return test_token_in * buy_ref * eth_price
+                    else:
+                        return test_token_in * buy_ref
+            return 0.0
+        target, cd, call_type, dec_out, _ = info
+        mc_calls.append({"target": target, "callData": cd})
+        mc_meta.append((label, call_type, dec_out, ref_amount))
+
+    # Build probe-size calldata (5 fractions × 2 legs = 10 calls)
+    # We need the reference prices first to compute max_token_in, but since
+    # we don't know buy_ref yet, we must compute token-in amounts later.
+    # Strategy: batch ref calls first (2 calls), decode, then batch all probe calls.
+    # Two-phase batching: phase-1 = 2 ref calls, phase-2 = 10 probe calls.
+
+    # ── Phase 1: 2 ref calls in one multicall3 round-trip ─────────────────────
+    CHUNK_SIZE = 50
+    try:
+        ref_raw = multicall3(w3, mc_calls)
+    except Exception as exc:
+        logger.debug("depth probe ref multicall failed: %s", exc)
+        return 0.0
+
+    buy_ref = decode_depth_probe_result(
+        ref_raw[0], mc_meta[0][1], mc_meta[0][2], ref_amount
+    )
+    sell_ref = decode_depth_probe_result(
+        ref_raw[1], mc_meta[1][1], mc_meta[1][2], ref_amount
+    )
     if not buy_ref or not sell_ref:
-        return 0.0  # Cannot get reference price — pool missing or illiquid
+        return 0.0
 
-    # Convert max_usdc (USD) to token_in amount using reference buy price
+    # Convert max_usdc (USD) to token_in using reference buy price
     if is_weth_pair:
-        max_token_in = (max_usdc / eth_price) / buy_ref   # USD→WETH→token_in
+        max_token_in = (max_usdc / eth_price) / buy_ref
     else:
-        max_token_in = max_usdc / buy_ref                  # USD→USDC→token_in
+        max_token_in = max_usdc / buy_ref
 
-    for frac in [1.0, 0.5, 0.25, 0.1, 0.05]:
+    # ── Phase 2: batch all 10 probe calls (5 fracs × 2 legs) ──────────────────
+    probe_fracs = [1.0, 0.5, 0.25, 0.1, 0.05]
+    probe_calls: list = []
+    probe_meta: list = []   # (frac_idx, leg: "buy"|"sell", call_type, dec_out, amount)
+
+    for frac_idx, frac in enumerate(probe_fracs):
         test_token_in = max_token_in * frac
+        for leg, dex_cfg_arg in [("buy", buy_dex_cfg), ("sell", sell_dex_cfg)]:
+            info = build_depth_probe_calldata(pair_cfg, dex_cfg_arg, test_token_in)
+            if info is None:
+                # No pool cached — insert a placeholder (None result = skip)
+                probe_calls.append(None)
+                probe_meta.append((frac_idx, leg, None, None, test_token_in))
+            else:
+                target, cd, call_type, dec_out, amt = info
+                probe_calls.append({"target": target, "callData": cd})
+                probe_meta.append((frac_idx, leg, call_type, dec_out, test_token_in))
 
-        buy_actual  = quote_at_amount(w3, pair_cfg, buy_dex_cfg,  test_token_in)
-        sell_actual = quote_at_amount(w3, pair_cfg, sell_dex_cfg, test_token_in)
+    # Execute in chunks of CHUNK_SIZE (handles >50 probes gracefully)
+    valid_calls = [(i, c) for i, c in enumerate(probe_calls) if c is not None]
+    raw_results: dict = {}  # index → decoded price or None
+
+    for chunk_start in range(0, len(valid_calls), CHUNK_SIZE):
+        chunk = valid_calls[chunk_start: chunk_start + CHUNK_SIZE]
+        try:
+            chunk_raw = multicall3(w3, [c for _, c in chunk])
+        except Exception as exc:
+            logger.debug("depth probe batch failed: %s", exc)
+            chunk_raw = [None] * len(chunk)
+        for (orig_idx, _), raw in zip(chunk, chunk_raw):
+            _, leg, call_type, dec_out, amt = probe_meta[orig_idx]
+            if call_type is None:
+                raw_results[orig_idx] = None
+            else:
+                raw_results[orig_idx] = decode_depth_probe_result(raw, call_type, dec_out, amt)
+
+    # Mark placeholder (None-call) entries as None
+    for i, c in enumerate(probe_calls):
+        if c is None and i not in raw_results:
+            raw_results[i] = None
+
+    # ── Phase 3: evaluate probe sizes in order (largest first) ────────────────
+    # Collect per-frac results
+    frac_prices: dict = {}  # frac_idx → {"buy": price|None, "sell": price|None}
+    for i, (frac_idx, leg, _, _, _) in enumerate(probe_meta):
+        if frac_idx not in frac_prices:
+            frac_prices[frac_idx] = {"buy": None, "sell": None}
+        frac_prices[frac_idx][leg] = raw_results.get(i)
+
+    for frac_idx, frac in enumerate(probe_fracs):
+        prices = frac_prices.get(frac_idx, {})
+        buy_actual  = prices.get("buy")
+        sell_actual = prices.get("sell")
         if not buy_actual or not sell_actual:
             continue
 
@@ -298,11 +413,11 @@ def find_max_executable_size(
         sell_slip = abs(sell_ref - sell_actual) / sell_ref if sell_ref > 0 else 1.0
 
         if buy_slip <= slippage_tol and sell_slip <= slippage_tol:
-            # Convert token_in back to USD
+            test_token_in = max_token_in * frac
             if is_weth_pair:
-                return test_token_in * buy_ref * eth_price   # token_in→WETH→USD
+                return test_token_in * buy_ref * eth_price
             else:
-                return test_token_in * buy_ref               # token_in→USDC
+                return test_token_in * buy_ref
 
     return 0.0  # No size within tolerance
 
