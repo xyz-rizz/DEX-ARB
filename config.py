@@ -18,6 +18,19 @@ BASE_RPC_URL: str     = os.getenv("BASE_RPC_URL", "")
 DRPC_RPC_URL: str     = os.getenv("DRPC_RPC_URL", "")
 ALCHEMY_EXEC_URL: str = os.getenv("ALCHEMY_EXEC_URL", "")
 
+# ── Chain selector ─────────────────────────────────────────────────────────────
+# Set CHAIN=arbitrum in .env to run on Arbitrum instead of Base.
+# All token/pair/DEX/flash-loan config resolves to the selected chain at import time.
+CHAIN: str = os.getenv("CHAIN", "base").lower()  # "base" | "arbitrum"
+
+# ── Arbitrum RPC endpoints ─────────────────────────────────────────────────────
+ARB_RPC_URL:  str = os.getenv("ARB_RPC_URL", "")   # read provider for Arbitrum
+ARB_EXEC_URL: str = os.getenv("ARB_EXEC_URL", "")  # execution provider for Arbitrum
+
+# Live-send guard for Arbitrum — off by default until benchmark validates profitability.
+# Set ARBITRUM_EXECUTE=true in .env to enable real sends on Arbitrum.
+ARBITRUM_EXECUTE: bool = os.getenv("ARBITRUM_EXECUTE", "false").lower() == "true"
+
 # ── Wallet ────────────────────────────────────────────────────────────────────
 PRIVATE_KEY: str = os.getenv("PRIVATE_KEY", "")
 WALLET_ADDRESS: str = "0x6F007D1C4F54954d9cdBb5fea81eB5A41FA9f312"
@@ -83,7 +96,6 @@ BALANCER_VAULT: str  = Web3.to_checksum_address("0xBA12222222228d8Ba445958a75a07
 # ── Token addresses (Base mainnet) ────────────────────────────────────────────
 USDC_ADDRESS:   str = Web3.to_checksum_address("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
 CBBTC_ADDRESS:  str = Web3.to_checksum_address("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf")
-WETH_ADDRESS:   str = Web3.to_checksum_address("0x4200000000000000000000000000000000000006")
 WEETH_ADDRESS:  str = Web3.to_checksum_address("0x04C0599Ae5A44757c0af6F9eC3b93da8976c150A")
 USDBC_ADDRESS:  str = Web3.to_checksum_address("0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA")
 DAI_ADDRESS:    str = Web3.to_checksum_address("0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb")
@@ -99,6 +111,18 @@ MOG_ADDRESS:    str = Web3.to_checksum_address("0x2Da56AcB9Ea78330f947bD57C54119
 HIGHER_ADDRESS: str = Web3.to_checksum_address("0x0578d8A44db98B23BF096A382e016e29a5Ce0ffe")
 EURC_ADDRESS:   str = Web3.to_checksum_address("0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42")
 USDT_ADDRESS:   str = Web3.to_checksum_address("0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2")
+# Base WETH (stored separately so it's always accessible regardless of active chain)
+_BASE_WETH_ADDRESS: str = Web3.to_checksum_address("0x4200000000000000000000000000000000000006")
+
+# ── Token addresses (Arbitrum mainnet) ────────────────────────────────────────
+ARB_WETH_ADDRESS: str  = Web3.to_checksum_address("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1")
+ARB_USDC_ADDRESS: str  = Web3.to_checksum_address("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")  # native USDC
+ARB_USDT_ADDRESS: str  = Web3.to_checksum_address("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9")
+ARB_WBTC_ADDRESS: str  = Web3.to_checksum_address("0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f")
+ARB_TOKEN_ADDRESS: str = Web3.to_checksum_address("0x912CE59144191C1204E64559FE8253a0e49E6548")
+
+# ── Chain-aware WETH (used by executor for borrow-token detection) ─────────────
+WETH_ADDRESS: str = ARB_WETH_ADDRESS if CHAIN == "arbitrum" else _BASE_WETH_ADDRESS
 
 # Token decimals (legacy — kept for backward compat)
 USDC_DECIMALS:  int = 6
@@ -118,16 +142,17 @@ UNISWAP_FEE_WEETH_WETH: int      = 100
 UNISWAP_FEE_PCT_CBBTC_USDC: float = 0.0005
 UNISWAP_FEE_PCT_WEETH_WETH: float = 0.0001
 
-# ── Chain ─────────────────────────────────────────────────────────────────────
-BASE_CHAIN_ID: int = 8453
+# ── Chain IDs ─────────────────────────────────────────────────────────────────
+BASE_CHAIN_ID:     int = 8453
+ARBITRUM_CHAIN_ID: int = 42161
+CHAIN_ID:          int = ARBITRUM_CHAIN_ID if CHAIN == "arbitrum" else BASE_CHAIN_ID
 
-# ── Pair config — 8 high-conviction Base pairs ────────────────────────────────
-# Removed: WETH/USDC (most competitive pair on Base; 9 confirmed reverts — spread
-#           closes in <1 block, impossible at 2.5s cycle time)
-# Removed: BRETT/WETH (phantom pool — PancakeSwap price = 0.0000, producing a
-#           ~2000% garbage spread every cycle; killed by slippage in sim but
-#           wastes a full detect pass)
-PAIR_CONFIG = [
+# ── Pair config ───────────────────────────────────────────────────────────────
+# PAIR_CONFIG resolves to the active chain's pairs at import time.
+# Base history note:
+#   Removed WETH/USDC (9 reverts — spread <1 block, cycle 2.5s)
+#   Removed BRETT/WETH (phantom pool — PancakeSwap price=0)
+_BASE_PAIR_CONFIG = [
     {
         "name": "cbBTC/USDC",
         "token_in":  "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
@@ -194,8 +219,55 @@ PAIR_CONFIG = [
     },
 ]
 
+# ── Arbitrum pair config ───────────────────────────────────────────────────────
+_ARBITRUM_PAIR_CONFIG = [
+    {
+        "name": "WETH/USDC",
+        "token_in":  ARB_WETH_ADDRESS,
+        "token_out": ARB_USDC_ADDRESS,
+        "dec_in": 18, "dec_out": 6,
+        "unit_size": 1.0,
+        "min_liquidity_usd": 200_000,
+    },
+    {
+        "name": "WBTC/USDC",
+        "token_in":  ARB_WBTC_ADDRESS,
+        "token_out": ARB_USDC_ADDRESS,
+        "dec_in": 8, "dec_out": 6,
+        "unit_size": 0.01,
+        "min_liquidity_usd": 100_000,
+    },
+    {
+        "name": "WBTC/WETH",
+        "token_in":  ARB_WBTC_ADDRESS,
+        "token_out": ARB_WETH_ADDRESS,
+        "dec_in": 8, "dec_out": 18,
+        "unit_size": 0.01,
+        "min_liquidity_usd": 100_000,
+    },
+    {
+        "name": "USDC/USDT",
+        "token_in":  ARB_USDC_ADDRESS,
+        "token_out": ARB_USDT_ADDRESS,
+        "dec_in": 6, "dec_out": 6,
+        "unit_size": 10_000.0,
+        "min_liquidity_usd": 100_000,
+    },
+    {
+        "name": "ARB/USDC",
+        "token_in":  ARB_TOKEN_ADDRESS,
+        "token_out": ARB_USDC_ADDRESS,
+        "dec_in": 18, "dec_out": 6,
+        "unit_size": 1000.0,
+        "min_liquidity_usd": 50_000,
+    },
+]
+
+# ── Active chain pair config ───────────────────────────────────────────────────
+PAIR_CONFIG = _ARBITRUM_PAIR_CONFIG if CHAIN == "arbitrum" else _BASE_PAIR_CONFIG
+
 # ── DEX config — 5 DEXes on Base ──────────────────────────────────────────────
-DEX_CONFIG = [
+_BASE_DEX_CONFIG = [
     {
         "name": "Aerodrome Slipstream",
         "type": "slipstream",          # Uniswap V3 CL fork; uses CLQuoter for execution quotes
@@ -238,8 +310,33 @@ DEX_CONFIG = [
     },
 ]
 
+# ── Arbitrum DEX config ────────────────────────────────────────────────────────
+# Aerodrome is Base-only. On Arbitrum: Uniswap V3 + Camelot V2.
+_ARBITRUM_DEX_CONFIG = [
+    {
+        "name": "Uniswap V3",
+        "type": "uniswap_v3",
+        "factory": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+        "router":  "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+        "quoter":  "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
+        "fee_tiers": [100, 500, 3000, 10000],
+    },
+    {
+        "name": "Camelot V2",          # Largest native Arbitrum AMM (Uniswap V2 fork)
+        "type": "uniswap_v2",
+        "factory": "0x6EcCab422D763aC031210895C81787E87B43A652",
+        "router":  "0xc873fEcbd354f5A56E00E710B90EF4201db2448d",
+        "fee_pct": 0.003,              # 0.3% default swap fee
+    },
+]
+
+# ── Active chain DEX config ────────────────────────────────────────────────────
+DEX_CONFIG = _ARBITRUM_DEX_CONFIG if CHAIN == "arbitrum" else _BASE_DEX_CONFIG
+
 # ── Flash loan providers (priority order) ─────────────────────────────────────
-FLASH_LOAN_PROVIDERS = [
+# Balancer V2 Vault and Morpho share the same address on Base and Arbitrum.
+# Morpho is Base/Ethereum only — excluded from the Arbitrum provider list.
+_BASE_FLASH_LOAN_PROVIDERS = [
     {
         "name": "Morpho",
         "address": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
@@ -256,12 +353,26 @@ FLASH_LOAN_PROVIDERS = [
     },
 ]
 
+_ARBITRUM_FLASH_LOAN_PROVIDERS = [
+    {
+        "name": "Balancer",
+        "address": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",  # same Vault on Arbitrum
+        "fee_pct": 0.0,
+        "callback": "receiveFlashLoan",
+        "priority": 1,
+    },
+]
+
+FLASH_LOAN_PROVIDERS = _ARBITRUM_FLASH_LOAN_PROVIDERS if CHAIN == "arbitrum" else _BASE_FLASH_LOAN_PROVIDERS
+
 
 def validate() -> None:
     """Raise ValueError if required configuration is missing or invalid."""
-    if not BASE_RPC_URL:
+    _active_rpc  = ARB_RPC_URL if CHAIN == "arbitrum" else BASE_RPC_URL
+    _rpc_var     = "ARB_RPC_URL" if CHAIN == "arbitrum" else "BASE_RPC_URL"
+    if not _active_rpc:
         raise ValueError(
-            "BASE_RPC_URL is empty — .env not loaded.\n"
+            f"{_rpc_var} is empty — .env not loaded.\n"
             f"  Expected .env at: {_ENV_PATH}"
         )
     if EXECUTE_MODE:

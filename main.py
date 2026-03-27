@@ -315,7 +315,11 @@ def run_cycle(w3_read: Web3, w3_exec: Web3 = None, stats: CycleStats = None) -> 
                 _log_best(top_opp, top_sim)
                 execute, reason = should_execute(top_opp, top_sim)
                 if execute:
-                    result = execute_arb(w3_exec, top_opp, top_sim, dry_run=config.DRY_RUN)
+                    # Arbitrum live sends are disabled unless ARBITRUM_EXECUTE=true.
+                    _dry = config.DRY_RUN or (
+                        config.CHAIN == "arbitrum" and not config.ARBITRUM_EXECUTE
+                    )
+                    result = execute_arb(w3_exec, top_opp, top_sim, dry_run=_dry)
                     log_opportunity(top_opp, result.tag, top_sim, error=result.error, tx_hash=result.tx_hash)
                 elif top_sim.is_executable:
                     log_opportunity(top_opp, "SKIP", top_sim)
@@ -353,16 +357,19 @@ def main() -> None:
         logger.critical("Config validation failed: %s", exc)
         sys.exit(1)
 
-    w3_read = Web3(Web3.HTTPProvider(config.BASE_RPC_URL))
+    _read_url = config.ARB_RPC_URL if config.CHAIN == "arbitrum" else config.BASE_RPC_URL
+    _exec_url = config.ARB_EXEC_URL if config.CHAIN == "arbitrum" else config.ALCHEMY_EXEC_URL
+    w3_read = Web3(Web3.HTTPProvider(_read_url))
     try:
         _block = w3_read.eth.block_number
     except Exception as exc:
-        logger.critical("Cannot connect to CDP RPC %s: %s", config.BASE_RPC_URL, exc)
+        logger.critical("Cannot connect to RPC %s: %s", _read_url, exc)
         sys.exit(1)
 
-    w3_exec = Web3(Web3.HTTPProvider(config.ALCHEMY_EXEC_URL)) if config.ALCHEMY_EXEC_URL else None
+    w3_exec = Web3(Web3.HTTPProvider(_exec_url)) if _exec_url else None
 
-    logger.info("Connected to Base mainnet — block %d", _block)
+    _chain_label = "Arbitrum mainnet" if config.CHAIN == "arbitrum" else "Base mainnet"
+    logger.info("Connected to %s — block %d", _chain_label, _block)
     _print_banner()
 
     stats = CycleStats()

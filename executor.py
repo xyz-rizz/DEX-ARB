@@ -325,7 +325,7 @@ def execute_arb(w3_exec, opp: ArbOpportunity, sim: SimResult,
             "gas":      600_000,
             "gasPrice": gas_price * 2,
             "nonce":    nonce,
-            "chainId":  config.BASE_CHAIN_ID,
+            "chainId":  config.CHAIN_ID,
         })
 
         logger.info(

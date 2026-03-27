@@ -633,6 +633,12 @@ def test_tier_marginal_pct_reads_from_env():
     import sys
     import os
 
+    # Save the original config module so we can restore the exact same object.
+    # Replacing sys.modules["config"] with a *new* object would cause downstream
+    # modules (e.g. main.config) to diverge from the test's module-level `config`
+    # reference, breaking patch.object calls in later tests.
+    orig_config = sys.modules.get("config")
+
     # Reload config with a custom MIN_SPREAD_PCT env value
     old_val = os.environ.get("MIN_SPREAD_PCT")
     os.environ["MIN_SPREAD_PCT"] = "0.001"
@@ -648,14 +654,20 @@ def test_tier_marginal_pct_reads_from_env():
         assert cfg_fresh.MIN_SPREAD_PCT == cfg_fresh.TIER_MARGINAL_PCT, \
             "MIN_SPREAD_PCT and TIER_MARGINAL_PCT must be identical"
     finally:
-        # Restore original env and config module
+        # Restore original env
         if old_val is None:
             os.environ.pop("MIN_SPREAD_PCT", None)
         else:
             os.environ["MIN_SPREAD_PCT"] = old_val
+        # Restore the exact original config module object so sys.modules["config"]
+        # stays stable for any module (e.g. main) that imports config for the first
+        # time after this test runs.
         if "config" in sys.modules:
             del sys.modules["config"]
-        importlib.import_module("config")
+        if orig_config is not None:
+            sys.modules["config"] = orig_config
+        else:
+            importlib.import_module("config")
 
 
 def test_zero_flash_loan_never_creates_profitable_opp():
