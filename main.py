@@ -319,7 +319,7 @@ def run_cycle(w3_read: Web3, w3_exec: Web3 = None, stats: CycleStats = None) -> 
                     log_opportunity(top_opp, result.tag, top_sim)
                 elif top_sim.is_executable:
                     log_opportunity(top_opp, "SKIP", top_sim)
-                    logger.debug("SKIP: %s", reason)
+                    logger.info("SKIP | %s | %s", top_opp.pair, reason)
             except Exception as exc:
                 logger.error("Execution logic failed: %s", exc)
         t_build = time.time()

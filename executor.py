@@ -163,7 +163,8 @@ def should_execute(opp: ArbOpportunity, sim: SimResult = None) -> tuple:
 
     Gates (all must pass):
     1. opp.is_profitable
-    2. opp.estimated_profit_usdc >= MIN_NET_PROFIT_USD
+    2a. Pre-sim early filter: if sim is None, opp.estimated_profit_usdc >= MIN_NET_PROFIT_USD
+    2b. Post-sim profit check: if sim is provided, sim.net_profit_usd >= MIN_NET_PROFIT_USD
     3. EXECUTE_MODE == True
     4. ARB_EXECUTOR_ADDRESS set (non-empty) — contract must be deployed
     5. sim.is_executable (if SimResult provided)
@@ -172,23 +173,33 @@ def should_execute(opp: ArbOpportunity, sim: SimResult = None) -> tuple:
         (True, "") if all gates pass
         (False, reason_str) if any gate fails
     """
+    # Gate 1: must be profitable after fees
     if not opp.is_profitable:
-        return False, "not profitable after fees"
+        return False, "blocked_by_not_profitable"
 
-    if opp.estimated_profit_usdc < config.MIN_NET_PROFIT_USD:
-        return False, (
-            f"profit ${opp.estimated_profit_usdc:.2f} < "
-            f"min ${config.MIN_NET_PROFIT_USD:.2f}"
+    # Gate 2a: pre-sim early filter (fast reject before running simulation)
+    if sim is None and opp.estimated_profit_usdc < config.MIN_NET_PROFIT_USD:
+        return False, "blocked_by_pre_sim_estimate:${:.2f}<${:.2f}".format(
+            opp.estimated_profit_usdc, config.MIN_NET_PROFIT_USD
         )
 
+    # Gate 2b: post-sim profit check (overrides pre-sim estimate when sim is available)
+    if sim is not None and sim.net_profit_usd < config.MIN_NET_PROFIT_USD:
+        return False, "blocked_by_sim_profit:${:.2f}<${:.2f}".format(
+            sim.net_profit_usd, config.MIN_NET_PROFIT_USD
+        )
+
+    # Gate 3: execute mode must be enabled
     if not config.EXECUTE_MODE:
-        return False, "EXECUTE_MODE=false"
+        return False, "blocked_by_execute_mode"
 
+    # Gate 4: contract must be deployed
     if not config.ARB_EXECUTOR_ADDRESS:
-        return False, "execution_not_ready_no_contract"
+        return False, "blocked_by_no_contract"
 
+    # Gate 5: simulation must approve execution
     if sim is not None and not sim.is_executable:
-        return False, f"simulation_rejected:{sim.rejection_reason}"
+        return False, "blocked_by_sim_rejection:{}".format(sim.rejection_reason)
 
     return True, ""
 

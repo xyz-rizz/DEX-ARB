@@ -56,7 +56,7 @@ def test_should_execute_false_when_execute_mode_off():
     with patch("executor.config.EXECUTE_MODE", False):
         result, reason = should_execute(opp)
     assert result is False
-    assert "EXECUTE_MODE=false" in reason
+    assert "blocked_by_execute_mode" in reason
 
 
 def test_should_execute_false_when_no_contract_address():
@@ -66,7 +66,7 @@ def test_should_execute_false_when_no_contract_address():
          patch("executor.config.ARB_EXECUTOR_ADDRESS", ""):
         result, reason = should_execute(opp)
     assert result is False
-    assert "execution_not_ready_no_contract" in reason
+    assert "blocked_by_no_contract" in reason
 
 
 def test_should_execute_false_when_below_min_profit():
@@ -173,7 +173,7 @@ def test_simulation_gate_blocks_execution():
          patch("executor.config.MIN_NET_PROFIT_USD", 10.0):
         result, reason = should_execute(opp, sim)
     assert result is False
-    assert "simulation_rejected" in reason
+    assert "blocked_by_sim_rejection" in reason
 
 
 def test_execution_uses_sim_result_amounts(tmp_path):

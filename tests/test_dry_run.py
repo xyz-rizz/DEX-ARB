@@ -232,3 +232,91 @@ def test_single_jsonl_record_per_execution_event(tmp_path):
     assert len(log_calls) == 1, (
         f"Expected exactly 1 total log call; got {len(log_calls)}: {log_calls}"
     )
+
+
+# ── Test 6: post-sim profit overrides low pre-sim estimate ────────────────────
+
+def test_should_execute_post_sim_overrides_pre_sim_estimate():
+    """sim.net_profit_usd=2.00 (above threshold) must override low pre-sim estimate=0.50.
+    Gate 2a is skipped when sim is provided; Gate 2b uses sim.net_profit_usd instead."""
+    from executor import should_execute
+
+    opp = _opp(profit=0.50)   # estimated_profit_usdc below MIN_NET_PROFIT_USD=1.0
+    sim = SimResult(
+        buy_dex="Aerodrome Slipstream",
+        sell_dex="PancakeSwap V3",
+        token_amount=2.51,
+        usdc_in=5000.0,
+        usdc_out=5002.1,
+        gross_profit_usd=2.1,
+        gas_cost_usd=0.1,
+        net_profit_usd=2.00,   # above MIN_NET_PROFIT_USD=1.0
+        flash_provider="Morpho",
+        is_executable=True,
+        rejection_reason="",
+    )
+
+    with patch("executor.config.MIN_NET_PROFIT_USD", 1.0), \
+         patch("executor.config.EXECUTE_MODE", True), \
+         patch("executor.config.ARB_EXECUTOR_ADDRESS", "0x" + "a" * 40):
+        result, reason = should_execute(opp, sim)
+
+    assert result is True, (
+        f"Expected (True, '') — sim.net_profit_usd=2.00 should override "
+        f"low pre-sim estimate=0.50; got ({result}, {reason!r})"
+    )
+    assert reason == "", f"Expected empty reason on pass; got {reason!r}"
+
+
+# ── Test 7: pre-sim blocks without sim ────────────────────────────────────────
+
+def test_should_execute_pre_sim_blocks_without_sim():
+    """When sim=None, low opp.estimated_profit_usdc must block execution via Gate 2a."""
+    from executor import should_execute
+
+    opp = _opp(profit=0.50)   # estimated_profit_usdc below MIN_NET_PROFIT_USD=1.0
+
+    with patch("executor.config.MIN_NET_PROFIT_USD", 1.0), \
+         patch("executor.config.EXECUTE_MODE", True), \
+         patch("executor.config.ARB_EXECUTOR_ADDRESS", "0x" + "a" * 40):
+        result, reason = should_execute(opp, None)
+
+    assert result is False, (
+        f"Expected False when sim=None and estimated_profit_usdc=0.50 < 1.0; got {result}"
+    )
+    assert "pre_sim_estimate" in reason, (
+        f"Expected reason containing 'pre_sim_estimate'; got {reason!r}"
+    )
+
+
+# ── Test 8: sim profit below threshold blocks execution ───────────────────────
+
+def test_should_execute_blocks_when_sim_profit_below_threshold():
+    """When sim.net_profit_usd is below MIN_NET_PROFIT_USD, execution must be blocked
+    regardless of high pre-sim estimate. Note: sim.is_executable=False means Gate 5
+    also blocks (rejected by simulate_arb), so any False return is correct."""
+    from executor import should_execute
+
+    opp = _opp(profit=5.0)   # estimated_profit_usdc above threshold
+    sim = SimResult(
+        buy_dex="Aerodrome Slipstream",
+        sell_dex="PancakeSwap V3",
+        token_amount=2.51,
+        usdc_in=5000.0,
+        usdc_out=5000.4,
+        gross_profit_usd=0.6,
+        gas_cost_usd=0.1,
+        net_profit_usd=0.50,   # below MIN_NET_PROFIT_USD=1.0
+        flash_provider="Morpho",
+        is_executable=False,
+        rejection_reason="below_min_profit:0.5<1.0",
+    )
+
+    with patch("executor.config.MIN_NET_PROFIT_USD", 1.0), \
+         patch("executor.config.EXECUTE_MODE", True), \
+         patch("executor.config.ARB_EXECUTOR_ADDRESS", "0x" + "a" * 40):
+        result, reason = should_execute(opp, sim)
+
+    assert result is False, (
+        f"Expected False — sim.net_profit_usd=0.50 < 1.0 and sim.is_executable=False; got {result}"
+    )
