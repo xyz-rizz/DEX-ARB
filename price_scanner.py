@@ -9,13 +9,15 @@ Never imports from the morpho_scanner liquidation bot.
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import List, Optional
 
+from eth_abi import decode as abi_decode, encode as abi_encode
 from web3 import Web3
 
 import config
+from utils.multicall import multicall3
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +205,26 @@ _ETH_PRICE_ROUGH_USD: float = 3500.0
 
 # Zero address constant
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+# ── Multicall3 pool cache ──────────────────────────────────────────────────────
+# key: (pair_name, dex_name, fee_or_tick)  →  pool_address (str) | None
+# "fee_or_tick" is an int (fee tier or tick spacing) for V3/slipstream,
+# or the string "v2" for Aerodrome vAMM (one pool per pair, no fee param).
+_pool_cache: dict = {}
+_pool_cache_initialized: bool = False
+
+# Pre-computed 4-byte function selectors for ABI calldata encoding.
+# Computed once at module load; no RPC call needed.
+_SEL_GETPOOL_TICK = Web3.keccak(text="getPool(address,address,int24)")[:4]
+_SEL_GETPOOL_FEE  = Web3.keccak(text="getPool(address,address,uint24)")[:4]
+_SEL_GETPAIR      = Web3.keccak(text="getPair(address,address,bool)")[:4]
+_SEL_QUOTE_SLIP   = Web3.keccak(
+    text="quoteExactInputSingle((address,address,uint256,int24,uint160))"
+)[:4]
+_SEL_QUOTE_V3     = Web3.keccak(
+    text="quoteExactInputSingle((address,address,uint256,uint24,uint160))"
+)[:4]
+_SEL_AMOUNT_OUT   = Web3.keccak(text="getAmountOut(uint256,address)")[:4]
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -660,7 +682,242 @@ def quote_at_amount(
         return None
 
 
-# ── Main price aggregator ─────────────────────────────────────────────────────
+# ── Multicall3 batch helpers ──────────────────────────────────────────────────
+
+def _populate_pool_cache(w3: Web3) -> None:
+    """
+    Batch-fetch ALL factory pool addresses into _pool_cache via Multicall3.
+
+    One call per (pair, dex, fee/tick) combination — 225 calls total for the
+    15-pair × 5-DEX configuration.  Fits in 3 chunks of 100 = 3 round-trips
+    (vs. 225 sequential round-trips previously).
+
+    Called once on the first get_all_prices() invocation.  Results are cached
+    for the lifetime of the process; factory pool addresses never change.
+    """
+    global _pool_cache
+
+    calls: list = []
+    call_keys: list = []
+
+    for pair_cfg in config.PAIR_CONFIG:
+        token_in  = Web3.to_checksum_address(pair_cfg["token_in"])
+        token_out = Web3.to_checksum_address(pair_cfg["token_out"])
+        pair_name = pair_cfg["name"]
+
+        for dex_cfg in config.DEX_CONFIG:
+            dex_name = dex_cfg["name"]
+            dex_type = dex_cfg["type"]
+            factory  = Web3.to_checksum_address(dex_cfg["factory"])
+
+            if dex_type == "slipstream":
+                for ts in dex_cfg.get("tick_spacings", [1, 50, 100, 200]):
+                    key = (pair_name, dex_name, ts)
+                    cd  = _SEL_GETPOOL_TICK + abi_encode(
+                        ["address", "address", "int24"], [token_in, token_out, ts]
+                    )
+                    calls.append({"target": factory, "callData": cd})
+                    call_keys.append(key)
+
+            elif dex_type == "uniswap_v3":
+                for fee in dex_cfg.get("fee_tiers", [500]):
+                    key = (pair_name, dex_name, fee)
+                    cd  = _SEL_GETPOOL_FEE + abi_encode(
+                        ["address", "address", "uint24"], [token_in, token_out, fee]
+                    )
+                    calls.append({"target": factory, "callData": cd})
+                    call_keys.append(key)
+
+            elif dex_type == "uniswap_v2":
+                key = (pair_name, dex_name, "v2")
+                cd  = _SEL_GETPAIR + abi_encode(
+                    ["address", "address", "bool"], [token_in, token_out, False]
+                )
+                calls.append({"target": factory, "callData": cd})
+                call_keys.append(key)
+
+    if not calls:
+        return
+
+    logger.info("Pool cache: fetching %d factory addresses via Multicall3", len(calls))
+
+    CHUNK_SIZE = 100
+    all_raw: list = []
+    for i in range(0, len(calls), CHUNK_SIZE):
+        chunk = calls[i : i + CHUNK_SIZE]
+        try:
+            all_raw.extend(multicall3(w3, chunk))
+        except Exception as exc:
+            logger.warning(
+                "Pool cache batch [%d:%d] failed: %s", i, i + len(chunk), exc
+            )
+            all_raw.extend([None] * len(chunk))
+
+    valid = 0
+    for key, raw in zip(call_keys, all_raw):
+        if raw is None:
+            _pool_cache[key] = None
+            continue
+        try:
+            addr = abi_decode(["address"], raw)[0]
+            pool = addr if addr.lower() != _ZERO_ADDRESS else None
+            _pool_cache[key] = pool
+            if pool is not None:
+                valid += 1
+        except Exception:
+            _pool_cache[key] = None
+
+    logger.info(
+        "Pool cache ready: %d entries, %d valid pools (factory calls: 0 from now on)",
+        len(_pool_cache), valid,
+    )
+
+
+def _batch_all_quotes(w3: Web3) -> dict:
+    """
+    Build and fire one (or a few) Multicall3 aggregate3 calls covering every
+    quoter call for every (pair × DEX × fee/tick) with a known pool address.
+
+    Returns the same {pair_name: [PriceQuote, ...]} dict as the old
+    sequential get_all_prices() — only pairs with ≥ 2 quotes are included.
+
+    Chunk size 50: one round-trip for up to 50 subcalls (~40–60 live pools
+    for this config), so typically 1–2 round-trips total vs. 300–900 before.
+    """
+    calls: list = []
+    call_meta: list = []  # (pair_cfg, dex_cfg, fee_or_tick, call_type)
+
+    try:
+        block = w3.eth.block_number
+    except Exception:
+        block = 0
+
+    for pair_cfg in config.PAIR_CONFIG:
+        token_in  = Web3.to_checksum_address(pair_cfg["token_in"])
+        token_out = Web3.to_checksum_address(pair_cfg["token_out"])
+        amount_in = int(pair_cfg["unit_size"] * (10 ** pair_cfg["dec_in"]))
+        pair_name = pair_cfg["name"]
+
+        for dex_cfg in config.DEX_CONFIG:
+            dex_name = dex_cfg["name"]
+            dex_type = dex_cfg["type"]
+
+            if dex_type == "slipstream":
+                quoter = Web3.to_checksum_address(
+                    dex_cfg.get("quoter") or config.AERODROME_SLIPSTREAM_QUOTER
+                )
+                for ts in dex_cfg.get("tick_spacings", [1, 50, 100, 200]):
+                    if _pool_cache.get((pair_name, dex_name, ts)) is None:
+                        continue
+                    cd = _SEL_QUOTE_SLIP + abi_encode(
+                        ["(address,address,uint256,int24,uint160)"],
+                        [(token_in, token_out, amount_in, ts, 0)],
+                    )
+                    calls.append({"target": quoter, "callData": cd})
+                    call_meta.append((pair_cfg, dex_cfg, ts, "slipstream"))
+
+            elif dex_type == "uniswap_v3":
+                quoter_raw = dex_cfg.get("quoter", "")
+                if not quoter_raw:
+                    continue
+                quoter = Web3.to_checksum_address(quoter_raw)
+                for fee in dex_cfg.get("fee_tiers", [500]):
+                    if _pool_cache.get((pair_name, dex_name, fee)) is None:
+                        continue
+                    cd = _SEL_QUOTE_V3 + abi_encode(
+                        ["(address,address,uint256,uint24,uint160)"],
+                        [(token_in, token_out, amount_in, fee, 0)],
+                    )
+                    calls.append({"target": quoter, "callData": cd})
+                    call_meta.append((pair_cfg, dex_cfg, fee, "uniswap_v3"))
+
+            elif dex_type == "uniswap_v2":
+                pool_addr = _pool_cache.get((pair_name, dex_name, "v2"))
+                if pool_addr is None:
+                    continue
+                cd = _SEL_AMOUNT_OUT + abi_encode(
+                    ["uint256", "address"], [amount_in, token_in]
+                )
+                calls.append(
+                    {"target": Web3.to_checksum_address(pool_addr), "callData": cd}
+                )
+                call_meta.append((pair_cfg, dex_cfg, "v2", "uniswap_v2"))
+
+    if not calls:
+        logger.debug("No quote calls to batch (empty or fully-missed pool cache)")
+        return {}
+
+    CHUNK_SIZE = 50
+    all_raw: list = []
+    n_chunks = 0
+    for i in range(0, len(calls), CHUNK_SIZE):
+        chunk = calls[i : i + CHUNK_SIZE]
+        n_chunks += 1
+        try:
+            all_raw.extend(multicall3(w3, chunk))
+        except Exception as exc:
+            logger.error("Quote batch [%d:%d] failed: %s", i, i + len(chunk), exc)
+            all_raw.extend([None] * len(chunk))
+
+    # Decode — keep best (highest) price per (pair, dex)
+    best_by_pd: dict = {}
+
+    for raw, (pair_cfg, dex_cfg, fee_or_tick, call_type) in zip(all_raw, call_meta):
+        if raw is None:
+            continue
+        pair_name = pair_cfg["name"]
+        dex_name  = dex_cfg["name"]
+        dec_out   = pair_cfg["dec_out"]
+        unit_size = pair_cfg["unit_size"]
+
+        try:
+            if call_type in ("slipstream", "uniswap_v3"):
+                amount_out_raw = abi_decode(
+                    ["uint256", "uint160", "uint32", "uint256"], raw
+                )[0]
+            else:
+                amount_out_raw = abi_decode(["uint256"], raw)[0]
+
+            if amount_out_raw == 0:
+                continue
+
+            price = (amount_out_raw / (10 ** dec_out)) / unit_size
+            if price <= 0:
+                continue
+
+            if call_type == "slipstream":
+                fee_pct = _TICK_SPACING_FEE.get(fee_or_tick, dex_cfg.get("fee_pct", 0.0001))
+            elif call_type == "uniswap_v3":
+                fee_pct = _FEE_TIER_PCT.get(fee_or_tick, fee_or_tick / 1_000_000)
+            else:
+                fee_pct = dex_cfg.get("fee_pct", 0.0002)
+
+            q = PriceQuote(
+                venue=dex_name, pair=pair_name,
+                price=price, fee_pct=fee_pct,
+                block=block, timestamp=time.time(),
+                method="execution",
+            )
+            pd_key = (pair_name, dex_name)
+            if pd_key not in best_by_pd or q.price > best_by_pd[pd_key].price:
+                best_by_pd[pd_key] = q
+
+        except Exception as exc:
+            logger.debug("Decode failed %s %s: %s", pair_name, dex_name, exc)
+
+    grouped: dict = defaultdict(list)
+    for (pair_name, _), q in best_by_pd.items():
+        grouped[pair_name].append(q)
+
+    result = {k: v for k, v in grouped.items() if len(v) >= 2}
+    logger.info(
+        "BATCH_QUOTES | calls=%d batches=%d pairs_returned=%d",
+        len(calls), n_chunks, len(result),
+    )
+    return result
+
+
+# ── Main price aggregator (legacy per-pair path, used by quote_at_amount) ─────
 
 def _get_quotes_for_pair(w3: Web3, pair_cfg: dict) -> List[PriceQuote]:
     """
@@ -693,6 +950,14 @@ def get_all_prices(w3: Web3) -> dict:
     """
     Fetch prices for all pairs in PAIR_CONFIG across all DEXes in DEX_CONFIG.
 
+    Uses Multicall3 batching to collapse the ~300-900 sequential eth_call
+    round-trips into 1-4 batches per cycle:
+
+      Startup  (first call only): batch factory.getPool/getPair for all
+                                   225 (pair × DEX × fee/tick) combos → 3 chunks.
+      Each cycle:                  batch quoter calls for all known pools
+                                   (~40-60 calls) → 1-2 chunks.
+
     Returns:
         {
             "cbBTC/USDC": [PriceQuote(Aerodrome), PriceQuote(Uniswap), ...],
@@ -700,26 +965,13 @@ def get_all_prices(w3: Web3) -> dict:
             ...
         }
 
-    Only pairs with at least 2 quotes (needed for arbitrage comparison) are included.
-    Pairs where all DEXes fail (no liquidity, pool not found) are omitted silently.
+    Only pairs with ≥ 2 quotes (needed for arb comparison) are included.
+    All reads use the w3 argument (dRPC). Never touches Alchemy.
     """
-    results: dict = {}
+    global _pool_cache_initialized
 
-    def _fetch(pair_cfg):
-        name = pair_cfg["name"]
-        try:
-            quotes = _get_quotes_for_pair(w3, pair_cfg)
-            if len(quotes) >= 2:
-                return name, quotes
-            elif len(quotes) == 1:
-                logger.debug("Only 1 DEX has liquidity for %s — skipping", name)
-        except Exception as e:
-            logger.error("get_all_prices failed for %s: %s", name, e)
-        return name, None
+    if not _pool_cache_initialized:
+        _populate_pool_cache(w3)
+        _pool_cache_initialized = True
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        for name, quotes in pool.map(_fetch, config.PAIR_CONFIG):
-            if quotes:
-                results[name] = quotes
-
-    return results
+    return _batch_all_quotes(w3)

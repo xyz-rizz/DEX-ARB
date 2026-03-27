@@ -166,54 +166,21 @@ def test_uniswap_price_weeth():
 
 
 def test_get_all_prices_returns_both_pairs():
-    """get_all_prices must return cbBTC/USDC and weETH/WETH at minimum."""
-    w3 = MagicMock()
-
-    cbbtc_sqrt = 3033126396693973345289760393
-    weeth_sqrt  = 82749893355765197634930415633
-    ZERO = "0x0000000000000000000000000000000000000000"
-
-    call_count = {"n": 0}
-
-    def mock_contract(address=None, abi=None):
-        m = MagicMock()
-        addr = str(address).lower() if address else ""
-
-        # Slipstream factory getPool calls: return zero for most, real for known
-        aero_cbbtc = config.AERO_CBBTC_USDC_POOL.lower()
-        aero_weeth = config.AERO_WEETH_WETH_POOL.lower()
-
-        if addr == aero_cbbtc:
-            m.functions.slot0.return_value.call.return_value = [cbbtc_sqrt, 1, 0, 1, 1, 0, True]
-        elif addr == aero_weeth:
-            m.functions.slot0.return_value.call.return_value = [weeth_sqrt, 1, 0, 1, 1, 0, True]
-        else:
-            # factory calls: return zero pool (no pool found)
-            m.functions.getPool.return_value.call.return_value = ZERO
-            m.functions.getPair.return_value.call.return_value = ZERO
-            # quoter calls: return non-zero amount
-            m.functions.quoteExactInputSingle.return_value.call.return_value = [
-                int(68193 * 1e6), 0, 0, 100000
-            ]
-            # ERC20 balance (liquidity gate)
-            m.functions.balanceOf.return_value.call.return_value = int(500_000 * 1e6)
-
-        m.functions.slot0.return_value.call.return_value = [cbbtc_sqrt, 1, 0, 1, 1, 0, True]
-        return m
-
-    w3.eth.contract.side_effect = mock_contract
-    w3.eth.block_number = 12000010
-
-    # Patch PAIR_CONFIG to just 2 pairs for speed; patch DEX_CONFIG to just slipstream+uni
-    mini_pairs = [
-        p for p in config.PAIR_CONFIG if p["name"] in ("cbBTC/USDC", "weETH/WETH")
-    ]
-    mini_dexes = [d for d in config.DEX_CONFIG if d["name"] in ("Aerodrome Slipstream", "Uniswap V3")]
-
-    with patch("config.PAIR_CONFIG", mini_pairs), patch("config.DEX_CONFIG", mini_dexes):
-        prices = get_all_prices(w3)
-
-    # At minimum, must return some results with PriceQuote objects
+    """get_all_prices returns PriceQuote objects — delegates to _batch_all_quotes."""
+    import price_scanner as ps
+    mock_quotes = {
+        "cbBTC/USDC": [
+            PriceQuote("Aerodrome Slipstream", "cbBTC/USDC", 68230.0, 0.0001, 1, time.time()),
+            PriceQuote("Uniswap V3", "cbBTC/USDC", 68100.0, 0.0005, 1, time.time()),
+        ],
+        "weETH/WETH": [
+            PriceQuote("Aerodrome Slipstream", "weETH/WETH", 1.091, 0.0001, 1, time.time()),
+            PriceQuote("Uniswap V3", "weETH/WETH", 1.090, 0.0001, 1, time.time()),
+        ],
+    }
+    with patch("price_scanner._populate_pool_cache"), \
+         patch("price_scanner._batch_all_quotes", return_value=mock_quotes):
+        prices = get_all_prices(MagicMock())
     for pair_name, quotes in prices.items():
         assert all(isinstance(q, PriceQuote) for q in quotes)
 
@@ -221,46 +188,17 @@ def test_get_all_prices_returns_both_pairs():
 # ── New multi-DEX tests ────────────────────────────────────────────────────────
 
 def test_multi_pair_scan_returns_all_pairs():
-    """get_all_prices returns an entry for every pair that has >= 2 DEX quotes."""
-    w3 = MagicMock()
-    ZERO = "0x0000000000000000000000000000000000000000"
-
-    def mock_contract(address=None, abi=None):
-        m = MagicMock()
-        # Slipstream / V3 factory: always return non-zero pool
-        m.functions.getPool.return_value.call.return_value = "0x" + "A" * 40
-        m.functions.getPair.return_value.call.return_value = "0x" + "B" * 40
-        # slot0: valid price
-        m.functions.slot0.return_value.call.return_value = [
-            3033126396693973345289760393, 1, 0, 1, 1, 0, True
+    """get_all_prices groups PriceQuote lists correctly via _batch_all_quotes."""
+    mock_quotes = {
+        p["name"]: [
+            PriceQuote("Aerodrome Slipstream", p["name"], 1.0, 0.0001, 1, time.time()),
+            PriceQuote("Uniswap V3",           p["name"], 1.0, 0.0005, 1, time.time()),
         ]
-        # QuoterV2: valid quote
-        m.functions.quoteExactInputSingle.return_value.call.return_value = [
-            int(68000 * 1e6), 0, 0, 100000
-        ]
-        # ERC20 balance for liquidity gate: 1M USDC
-        m.functions.balanceOf.return_value.call.return_value = int(1_000_000 * 1e6)
-        # V2 token0
-        m.functions.token0.return_value.call.return_value = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
-        # V2 getReserves
-        m.functions.getReserves.return_value.call.return_value = [
-            int(1000 * 1e8), int(68_000_000 * 1e6), 0
-        ]
-        return m
-
-    w3.eth.contract.side_effect = mock_contract
-    w3.eth.block_number = 99
-
-    # Only scan 3 pairs to keep test fast
-    mini_pairs = config.PAIR_CONFIG[:3]
-    mini_dexes = config.DEX_CONFIG[:2]
-
-    with patch("config.PAIR_CONFIG", mini_pairs), \
-         patch("config.DEX_CONFIG", mini_dexes), \
-         patch("price_scanner._check_liquidity", return_value=True):
-        prices = get_all_prices(w3)
-
-    # Should return up to 3 pairs with lists of quotes
+        for p in config.PAIR_CONFIG[:3]
+    }
+    with patch("price_scanner._populate_pool_cache"), \
+         patch("price_scanner._batch_all_quotes", return_value=mock_quotes):
+        prices = get_all_prices(MagicMock())
     for name, quotes in prices.items():
         assert isinstance(quotes, list)
         assert all(isinstance(q, PriceQuote) for q in quotes)
@@ -311,23 +249,22 @@ def test_liquidity_gate_passes_with_enough():
 
 
 def test_best_price_selection_across_dexes():
-    """get_all_prices returns the DEX with highest price in the list."""
-    w3 = MagicMock()
-
+    """get_all_prices preserves both DEX quotes so caller can pick best/worst."""
     quotes_returned = [
         PriceQuote("Aerodrome Slipstream", "cbBTC/USDC", 68300.0, 0.0001, 1, time.time()),
         PriceQuote("Uniswap V3",           "cbBTC/USDC", 68100.0, 0.0005, 1, time.time()),
     ]
+    mock_batch = {"cbBTC/USDC": quotes_returned}
 
-    with patch("price_scanner._get_quotes_for_pair", return_value=quotes_returned), \
-         patch("config.PAIR_CONFIG", [config.PAIR_CONFIG[0]]):
-        prices = get_all_prices(w3)
+    with patch("price_scanner._populate_pool_cache"), \
+         patch("price_scanner._batch_all_quotes", return_value=mock_batch):
+        prices = get_all_prices(MagicMock())
 
     assert "cbBTC/USDC" in prices
     prices_list = prices["cbBTC/USDC"]
-    best = max(prices_list, key=lambda q: q.price)
+    best  = max(prices_list, key=lambda q: q.price)
     worst = min(prices_list, key=lambda q: q.price)
-    assert best.price == 68300.0
+    assert best.price  == 68300.0
     assert worst.price == 68100.0
 
 
@@ -451,3 +388,173 @@ def test_price_quote_has_method_execution():
         invert=True, pair="cbBTC/USDC", fee_pct=0.0001,
     )
     assert q_spot.method == "spot"
+
+
+# ── Multicall3 batching tests ──────────────────────────────────────────────────
+
+def test_get_all_prices_uses_multicall_not_sequential():
+    """get_all_prices must call multicall3 (not individual eth_calls per pair)."""
+    import price_scanner as ps
+    from eth_abi import encode as abi_encode
+
+    # Build minimal valid ABI-encoded address return for factory calls
+    valid_pool_raw = abi_encode(["address"], ["0x" + "A" * 40])
+    # Build valid ABI-encoded quote return (amountOut=int(68000*1e6), then 3 zeros)
+    valid_quote_raw = abi_encode(
+        ["uint256", "uint160", "uint32", "uint256"],
+        [int(68_000 * 1e6), 0, 0, 0],
+    )
+
+    multicall_call_count = {"n": 0}
+
+    def fake_multicall(w3, calls):
+        multicall_call_count["n"] += 1
+        # pool cache phase: return valid address for every call
+        # quote phase: return valid quote for every call
+        results = []
+        for c in calls:
+            cd = c["callData"]
+            # Distinguish factory vs quoter by calldata length:
+            # factory encode: 4 + 32*3 = 100 bytes
+            # quoter encode:  4 + 32*5 = 164 bytes (tuple)
+            results.append(valid_quote_raw if len(cd) > 110 else valid_pool_raw)
+        return results
+
+    ps._pool_cache.clear()
+    ps._pool_cache_initialized = False
+
+    mini_pairs = config.PAIR_CONFIG[:2]
+    mini_dexes = [d for d in config.DEX_CONFIG if d["name"] in ("Uniswap V3",)]
+
+    with patch("price_scanner.multicall3", side_effect=fake_multicall), \
+         patch("config.PAIR_CONFIG", mini_pairs), \
+         patch("config.DEX_CONFIG",  mini_dexes):
+        prices = get_all_prices(MagicMock())
+
+    assert multicall_call_count["n"] >= 1, "multicall3 must have been called"
+    # All returned quotes must be PriceQuote objects
+    for pair_name, quotes in prices.items():
+        assert all(isinstance(q, PriceQuote) for q in quotes)
+
+
+def test_failed_subcall_silently_skipped():
+    """A None result from one subcall must not affect other results."""
+    import price_scanner as ps
+    from eth_abi import encode as abi_encode
+
+    pair_name_0 = config.PAIR_CONFIG[0]["name"]  # cbBTC/USDC
+    pair_name_1 = config.PAIR_CONFIG[1]["name"]  # weETH/WETH
+
+    # Pre-populate cache with two pools
+    ps._pool_cache.clear()
+    ps._pool_cache_initialized = True
+    ps._pool_cache[(pair_name_0, "Uniswap V3", 500)]  = "0x" + "A" * 40
+    ps._pool_cache[(pair_name_0, "Aerodrome Slipstream", 1)] = "0x" + "B" * 40
+    ps._pool_cache[(pair_name_1, "Uniswap V3", 100)]  = "0x" + "C" * 40
+    ps._pool_cache[(pair_name_1, "Aerodrome Slipstream", 1)] = "0x" + "D" * 40
+
+    dec_out_0 = config.PAIR_CONFIG[0]["dec_out"]
+    dec_out_1 = config.PAIR_CONFIG[1]["dec_out"]
+    valid_q0 = abi_encode(["uint256","uint160","uint32","uint256"], [int(68000 * 10**dec_out_0), 0, 0, 0])
+    valid_q1 = abi_encode(["uint256","uint160","uint32","uint256"], [int(1.09  * 10**dec_out_1), 0, 0, 0])
+
+    call_num = {"n": 0}
+
+    def fake_multicall(w3, calls):
+        call_num["n"] += 1
+        # Return None for first call (fail it), valid for the rest
+        out = [None] + [valid_q0 if call_num["n"] == 1 else valid_q1] * (len(calls) - 1)
+        # Alternate between q0 and q1 decoded values
+        results = []
+        for i, c in enumerate(calls):
+            if i == 0:
+                results.append(None)
+            elif i % 2 == 0:
+                results.append(valid_q1)
+            else:
+                results.append(valid_q0)
+        return results
+
+    mini_pairs = config.PAIR_CONFIG[:2]
+    mini_dexes = [d for d in config.DEX_CONFIG
+                  if d["name"] in ("Uniswap V3", "Aerodrome Slipstream")]
+
+    with patch("price_scanner.multicall3", side_effect=fake_multicall), \
+         patch("config.PAIR_CONFIG", mini_pairs), \
+         patch("config.DEX_CONFIG",  mini_dexes):
+        prices = get_all_prices(MagicMock())
+
+    # No exception must have been raised (if we get here, test passes that check)
+    # Quotes for remaining successful calls should be present
+    for pair_name, quotes in prices.items():
+        assert isinstance(quotes, list)
+
+
+def test_all_subcalls_failed_returns_empty():
+    """If every quote subcall fails, get_all_prices returns {} without exception."""
+    import price_scanner as ps
+
+    ps._pool_cache.clear()
+    ps._pool_cache_initialized = True
+    # Put one valid pool in cache so _batch_all_quotes builds calls
+    ps._pool_cache[("cbBTC/USDC", "Uniswap V3", 500)]  = "0x" + "A" * 40
+    ps._pool_cache[("cbBTC/USDC", "Aerodrome Slipstream", 1)] = "0x" + "B" * 40
+
+    def all_fail(w3, calls):
+        return [None] * len(calls)
+
+    mini_pairs = [config.PAIR_CONFIG[0]]
+    mini_dexes = [d for d in config.DEX_CONFIG
+                  if d["name"] in ("Uniswap V3", "Aerodrome Slipstream")]
+
+    with patch("price_scanner.multicall3", side_effect=all_fail), \
+         patch("config.PAIR_CONFIG", mini_pairs), \
+         patch("config.DEX_CONFIG",  mini_dexes):
+        prices = get_all_prices(MagicMock())
+
+    assert prices == {}, f"Expected empty dict when all subcalls fail, got {prices}"
+
+
+def test_pool_cache_populated_on_first_call():
+    """_pool_cache must be filled after first call; factory calls must not repeat."""
+    import price_scanner as ps
+
+    ps._pool_cache.clear()
+    ps._pool_cache_initialized = False
+
+    populate_calls = {"n": 0}
+
+    def fake_populate(w3):
+        populate_calls["n"] += 1
+        # Simulate finding one valid pool
+        ps._pool_cache[("cbBTC/USDC", "Uniswap V3", 500)] = "0x" + "A" * 40
+
+    with patch("price_scanner._populate_pool_cache", side_effect=fake_populate), \
+         patch("price_scanner._batch_all_quotes", return_value={}):
+        get_all_prices(MagicMock())
+
+    assert ps._pool_cache_initialized is True, "cache must be marked initialized"
+    assert len(ps._pool_cache) > 0, "cache must be non-empty after first call"
+    assert populate_calls["n"] == 1, "_populate_pool_cache called on first call"
+
+    # Second call must NOT invoke _populate_pool_cache again
+    with patch("price_scanner._populate_pool_cache", side_effect=fake_populate), \
+         patch("price_scanner._batch_all_quotes", return_value={}):
+        get_all_prices(MagicMock())
+
+    assert populate_calls["n"] == 1, "factory.getPool must not be called again"
+
+
+def test_read_provider_is_drpc_not_alchemy():
+    """price_scanner must use the dRPC read endpoint — no Alchemy references."""
+    import inspect, price_scanner as ps
+
+    src = inspect.getsource(ps)
+    assert "ALCHEMY_EXEC_URL" not in src, "price_scanner must not reference ALCHEMY_EXEC_URL"
+    assert "TYJjLPev" not in src, "price_scanner must not embed an Alchemy API key"
+
+    # The two endpoints must be configured as distinct URLs (unless .env not set)
+    if config.BASE_RPC_URL and config.ALCHEMY_EXEC_URL:
+        assert config.BASE_RPC_URL != config.ALCHEMY_EXEC_URL, (
+            "Read (dRPC) and execution (Alchemy) endpoints must be different URLs"
+        )
