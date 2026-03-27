@@ -214,6 +214,20 @@ def _evaluate_pair_best(
     total_fee_pct    = (buy_quote.fee_pct + sell_quote.fee_pct) * 100.0
     net_spread_pct   = gross_spread_pct - total_fee_pct
 
+    # Sanity cap: reject absurdly large spreads before tier assignment.
+    # Root cause: Aerodrome Slipstream uses slot0 spot price (zero slippage)
+    # while PancakeSwap V3 uses QuoterV2 execution quote (includes slippage).
+    # A thin pool (e.g. BRETT/WETH unit_size=100k) produces apparent spreads
+    # >2000% — physically impossible between two liquid DEXes on the same chain.
+    if gross_spread_pct > config.MAX_GROSS_SPREAD_PCT:
+        logger.debug(
+            "OUTLIER_REJECTED | %s | gross_spread=%.4f%% > sanity_cap=%.1f%% | "
+            "buy=%s@%.8g sell=%s@%.8g — likely stale/thin pool vs slippage mismatch",
+            pair, gross_spread_pct, config.MAX_GROSS_SPREAD_PCT,
+            buy_quote.venue, buy_price, sell_quote.venue, sell_price,
+        )
+        return None
+
     tier         = assign_tier(net_spread_pct)
     is_profitable = tier in ("PRIME", "GOOD", "MARGINAL")
 

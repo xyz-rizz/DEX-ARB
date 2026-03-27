@@ -39,6 +39,13 @@ TIER_PRIME_PCT: float    = 0.15   # PRIME: execute at max size ($50k)
 TIER_GOOD_PCT: float     = 0.10   # GOOD: execute at normal size ($34k)
 TIER_MARGINAL_PCT: float = 0.065  # MARGINAL: execute at half size ($17k) = MIN_SPREAD_PCT
 
+# ── Quote sanity cap ───────────────────────────────────────────────────────────
+# Gross spread above this % is physically impossible between two liquid DEXes on
+# the same chain and is treated as bad data (stale pool, slippage mismatch,
+# decimal error). Rejected before tier assignment.
+# Rationale: largest realistic cross-DEX arb is ~2%; 5% gives 2.5x headroom.
+MAX_GROSS_SPREAD_PCT: float = float(os.getenv("MAX_GROSS_SPREAD_PCT", "5.0"))
+
 # ── Tier flash loan sizes ─────────────────────────────────────────────────────
 FLASH_PRIME_USDC:    float = 50_000.0
 FLASH_GOOD_USDC:     float = 34_000.0

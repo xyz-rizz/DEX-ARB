@@ -391,3 +391,81 @@ def test_best_opportunity_is_highest_net_profit():
     # First opportunity must have highest profit
     for i in range(1, len(all_opps)):
         assert all_opps[0].estimated_profit_usdc >= all_opps[i].estimated_profit_usdc
+
+
+# ── Sanity cap (MAX_GROSS_SPREAD_PCT) ─────────────────────────────────────────
+
+def test_outlier_spread_rejected_by_sanity_cap():
+    """
+    BRETT/WETH regression: Aerodrome slot0 (spot, no slippage) vs PancakeSwap
+    QuoterV2 (execution quote, thin pool) produces ~2009% apparent gross spread.
+    Must be rejected before tier assignment — _evaluate_pair_best returns None.
+    """
+    # Simulate the live bug: pancake execution quote crushed by slippage
+    aero_brett  = _make_quote("Aerodrome", 0.00021,  fee_pct=0.0001, pair="BRETT/WETH")
+    pancake_brett = _make_quote("PancakeSwap", 0.0000099, fee_pct=0.0025, pair="BRETT/WETH")
+
+    # gross spread ≈ (0.00021 - 0.0000099) / 0.0000099 * 100 ≈ 2020%
+    gross = (aero_brett.price - pancake_brett.price) / pancake_brett.price * 100
+    assert gross > config.MAX_GROSS_SPREAD_PCT, "test precondition: spread must exceed cap"
+
+    opp = _evaluate_pair_best(
+        "BRETT/WETH",
+        [aero_brett, pancake_brett],
+        min_spread_pct=0.0,
+        max_flash_usdc=50_000,
+    )
+    assert opp is None, f"Expected None (outlier rejected), got tier={opp and opp.tier}"
+
+
+def test_legitimate_spread_passes_sanity_cap():
+    """
+    A real 0.21% gross spread on cbBTC/USDC (→ 0.15% net → PRIME) must NOT be
+    rejected by the sanity cap. Verifies only the outlier filter is checked, not
+    everyday legitimate arb.
+    """
+    # gross ≈ (68300 - 68154) / 68154 * 100 ≈ 0.214% → net ≈ 0.154% → PRIME
+    aero = _make_quote("aerodrome", 68300.0, fee_pct=0.0001, pair="cbBTC/USDC")
+    uni  = _make_quote("uniswap",   68154.0, fee_pct=0.0005, pair="cbBTC/USDC")
+
+    gross = (aero.price - uni.price) / uni.price * 100
+    assert gross < config.MAX_GROSS_SPREAD_PCT, "test precondition: spread must be below cap"
+
+    opp = _evaluate_pair_best(
+        "cbBTC/USDC",
+        [aero, uni],
+        min_spread_pct=0.0,
+        max_flash_usdc=50_000,
+    )
+    assert opp is not None, "Legitimate spread should not be rejected"
+    assert opp.tier == "PRIME"
+
+
+def test_outlier_never_reaches_prime_tier():
+    """
+    End-to-end: a 2000%+ gross spread pair must never appear as PRIME in
+    detect_all_opportunities output, regardless of how it got there.
+    """
+    # Valid pair
+    aero_btc = _make_quote("aerodrome", 68300.0, fee_pct=0.0001, pair="cbBTC/USDC")
+    uni_btc  = _make_quote("uniswap",   68197.0, fee_pct=0.0005, pair="cbBTC/USDC")
+    # Outlier pair mimicking BRETT bug
+    aero_brett   = _make_quote("Aerodrome",  0.00021,   fee_pct=0.0001, pair="BRETT/WETH")
+    pancake_brett = _make_quote("PancakeSwap", 0.0000099, fee_pct=0.0025, pair="BRETT/WETH")
+
+    prices = {
+        "cbBTC/USDC":  [aero_btc, uni_btc],
+        "BRETT/WETH":  [aero_brett, pancake_brett],
+    }
+
+    all_opps = detect_all_opportunities(prices, min_spread_pct=0.0, max_flash_usdc=50_000)
+
+    brett_opps = [o for o in all_opps if o.pair == "BRETT/WETH"]
+    assert brett_opps == [], f"BRETT/WETH must be filtered out, found: {brett_opps}"
+
+    prime_opps = [o for o in all_opps if o.tier == "PRIME"]
+    for o in prime_opps:
+        assert o.gross_spread_pct <= config.MAX_GROSS_SPREAD_PCT, (
+            f"{o.pair} has tier=PRIME but gross_spread={o.gross_spread_pct:.2f}% "
+            f"exceeds sanity cap={config.MAX_GROSS_SPREAD_PCT}%"
+        )

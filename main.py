@@ -97,8 +97,8 @@ def _log_scan_line(opp: ArbOpportunity) -> None:
     flash_k = f"${opp.flash_loan_usdc/1000:.0f}k" if opp.flash_loan_usdc >= 1000 else f"${opp.flash_loan_usdc:.0f}"
     print(
         f"ARB_SCAN | {opp.pair} | "
-        f"{opp.buy_venue[:6]}={opp.buy_price:.4f} "
-        f"{opp.sell_venue[:6]}={opp.sell_price:.4f} | "
+        f"{opp.buy_venue[:6]}={opp.buy_price:.8g} "
+        f"{opp.sell_venue[:6]}={opp.sell_price:.8g} | "
         f"spread={opp.gross_spread_pct:.4f}% net={opp.net_spread_pct:.4f}% | "
         f"flash={flash_k} | "
         f"profit=${opp.estimated_profit_usdc:.2f} | {tier_str}"

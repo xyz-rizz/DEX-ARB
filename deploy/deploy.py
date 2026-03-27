@@ -6,8 +6,12 @@ Prerequisites:
   - PRIVATE_KEY set in .env
   - BASE_RPC_URL or ALCHEMY_EXEC_URL set in .env (Alchemy preferred for writes)
 
-Usage:
-  cd /Users/rizz/DEX\ Arb
+Usage (local Mac):
+  cd "/Users/rizz/DEX Arb"
+  python deploy/deploy.py
+
+Usage (EC2 server):
+  cd /home/ubuntu/dexarb
   python deploy/deploy.py
 
 On success:
