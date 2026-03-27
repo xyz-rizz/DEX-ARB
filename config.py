@@ -29,51 +29,260 @@ ARB_EXECUTOR_ADDRESS: str = os.getenv("ARB_EXECUTOR_ADDRESS", "")
 EXECUTE_MODE: bool           = os.getenv("EXECUTE_MODE", "false").lower() == "true"
 DRY_RUN: bool                = os.getenv("DRY_RUN", "true").lower() == "true"
 MIN_NET_PROFIT_USD: float    = float(os.getenv("MIN_NET_PROFIT_USD", "10.0"))
-MIN_SPREAD_PCT: float        = float(os.getenv("MIN_SPREAD_PCT", "0.08"))
+# cbBTC floor ~0.06%, 0.065 = small safety margin
+MIN_SPREAD_PCT: float        = float(os.getenv("MIN_SPREAD_PCT", "0.065"))
 SCAN_INTERVAL_SECONDS: float = float(os.getenv("SCAN_INTERVAL_SECONDS", "2"))
 MAX_FLASH_LOAN_USDC: float   = float(os.getenv("MAX_FLASH_LOAN_USDC", "50000"))
+
+# ── Tier thresholds (net spread in %) ─────────────────────────────────────────
+TIER_PRIME_PCT: float    = 0.15   # PRIME: execute at max size ($50k)
+TIER_GOOD_PCT: float     = 0.10   # GOOD: execute at normal size ($34k)
+TIER_MARGINAL_PCT: float = 0.065  # MARGINAL: execute at half size ($17k) = MIN_SPREAD_PCT
+
+# ── Tier flash loan sizes ─────────────────────────────────────────────────────
+FLASH_PRIME_USDC:    float = 50_000.0
+FLASH_GOOD_USDC:     float = 34_000.0
+FLASH_MARGINAL_USDC: float = 17_000.0
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_DIR: str = os.getenv("LOG_DIR", "logs")
 
-# ── Uniswap V3 (Base mainnet) ─────────────────────────────────────────────────
+# ── Protocol addresses (Base mainnet) ─────────────────────────────────────────
 UNISWAP_SWAP_ROUTER_02: str = Web3.to_checksum_address("0x2626664c2603336E57B271c5C0b26F421741e481")
 UNISWAP_QUOTER_V2: str      = Web3.to_checksum_address("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a")
 UNISWAP_FACTORY: str        = Web3.to_checksum_address("0x33128a8fC17869897dcE68Ed026d694621f6FDfD")
 
-# ── Aerodrome (Base mainnet) ──────────────────────────────────────────────────
-AERODROME_ROUTER: str  = Web3.to_checksum_address("0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43")
-AERODROME_FACTORY: str = Web3.to_checksum_address("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
+AERODROME_ROUTER: str        = Web3.to_checksum_address("0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43")
+AERODROME_FACTORY: str       = Web3.to_checksum_address("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
+AERODROME_VAMM_FACTORY: str  = Web3.to_checksum_address("0x420DD381b31aEf6683db6B902084cB0FFECe40Da")
 
-# ── Morpho (flash loan) ───────────────────────────────────────────────────────
-MORPHO_ADDRESS: str = Web3.to_checksum_address("0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb")
+MORPHO_ADDRESS: str  = Web3.to_checksum_address("0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb")
+BALANCER_VAULT: str  = Web3.to_checksum_address("0xBA12222222228d8Ba445958a75a0704d566BF2C8")
 
 # ── Token addresses (Base mainnet) ────────────────────────────────────────────
-USDC_ADDRESS:  str = Web3.to_checksum_address("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
-CBBTC_ADDRESS: str = Web3.to_checksum_address("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf")
-WETH_ADDRESS:  str = Web3.to_checksum_address("0x4200000000000000000000000000000000000006")
-WEETH_ADDRESS: str = Web3.to_checksum_address("0x04C0599Ae5A44757c0af6F9eC3b93da8976c150A")
+USDC_ADDRESS:   str = Web3.to_checksum_address("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
+CBBTC_ADDRESS:  str = Web3.to_checksum_address("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf")
+WETH_ADDRESS:   str = Web3.to_checksum_address("0x4200000000000000000000000000000000000006")
+WEETH_ADDRESS:  str = Web3.to_checksum_address("0x04C0599Ae5A44757c0af6F9eC3b93da8976c150A")
+USDBC_ADDRESS:  str = Web3.to_checksum_address("0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA")
+DAI_ADDRESS:    str = Web3.to_checksum_address("0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb")
+CBETH_ADDRESS:  str = Web3.to_checksum_address("0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22")
+WSTETH_ADDRESS: str = Web3.to_checksum_address("0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452")
+AERO_ADDRESS:   str = Web3.to_checksum_address("0x940181a94A35A4569E4529A3CDfB74e38FD98631")
+DEGEN_ADDRESS:  str = Web3.to_checksum_address("0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed")
+BRETT_ADDRESS:  str = Web3.to_checksum_address("0x532f27101965dd16442E59d40670FaF5eBB142E4")
+VIRTUAL_ADDRESS:str = Web3.to_checksum_address("0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b")
+TOSHI_ADDRESS:  str = Web3.to_checksum_address("0xAC1Bd2486aAf3B5C0fc3Fd868558b082a531B2B4")
+CBXRP_ADDRESS:  str = Web3.to_checksum_address("0x4B4143fBe6823D0f21882Ba4B53a5E7C11a7B395")
+MOG_ADDRESS:    str = Web3.to_checksum_address("0x2Da56AcB9Ea78330f947bD57C54119Debda7AF71")
+HIGHER_ADDRESS: str = Web3.to_checksum_address("0x0578d8A44db98B23BF096A382e016e29a5Ce0ffe")
 
-# Token decimals
+# Token decimals (legacy — kept for backward compat)
 USDC_DECIMALS:  int = 6
 CBBTC_DECIMALS: int = 8
 WETH_DECIMALS:  int = 18
 WEETH_DECIMALS: int = 18
 
-# ── Pool addresses (verified via slot0 calls) ─────────────────────────────────
+# ── Legacy pool addresses (verified via slot0 calls) ──────────────────────────
 AERO_CBBTC_USDC_POOL: str = Web3.to_checksum_address("0x4F5905e36ac07eE1F01ffB939aA7f212A58D5CDF")
 AERO_WEETH_WETH_POOL: str = Web3.to_checksum_address("0xbD3cd0D9d429b41F0a2e1C026552Bd598294d5E0")
 
-# ── Fee tiers ─────────────────────────────────────────────────────────────────
-AERODROME_FEE_CBBTC_USDC: float = 0.0001   # 0.01% — tick=1
-AERODROME_FEE_WEETH_WETH: float = 0.0001   # 0.01%
-UNISWAP_FEE_CBBTC_USDC: int     = 500      # 0.05%
-UNISWAP_FEE_WEETH_WETH: int     = 100      # 0.01%
+# ── Legacy fee tiers (kept for backward compat) ───────────────────────────────
+AERODROME_FEE_CBBTC_USDC: float  = 0.0001
+AERODROME_FEE_WEETH_WETH: float  = 0.0001
+UNISWAP_FEE_CBBTC_USDC: int      = 500
+UNISWAP_FEE_WEETH_WETH: int      = 100
 UNISWAP_FEE_PCT_CBBTC_USDC: float = 0.0005
 UNISWAP_FEE_PCT_WEETH_WETH: float = 0.0001
 
 # ── Chain ─────────────────────────────────────────────────────────────────────
 BASE_CHAIN_ID: int = 8453
+
+# ── Pair config — 15 high-volume Base pairs ───────────────────────────────────
+PAIR_CONFIG = [
+    {
+        "name": "cbBTC/USDC",
+        "token_in":  "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+        "token_out": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "dec_in": 8, "dec_out": 6,
+        "unit_size": 0.1,
+        "min_liquidity_usd": 100_000,
+    },
+    {
+        "name": "weETH/WETH",
+        "token_in":  "0x04C0599Ae5A44757c0af6F9eC3b93da8976c150A",
+        "token_out": "0x4200000000000000000000000000000000000006",
+        "dec_in": 18, "dec_out": 18,
+        "unit_size": 1.0,
+        "min_liquidity_usd": 50_000,
+    },
+    {
+        "name": "cbETH/WETH",
+        "token_in":  "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
+        "token_out": "0x4200000000000000000000000000000000000006",
+        "dec_in": 18, "dec_out": 18,
+        "unit_size": 1.0,
+        "min_liquidity_usd": 50_000,
+    },
+    {
+        "name": "wstETH/WETH",
+        "token_in":  "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
+        "token_out": "0x4200000000000000000000000000000000000006",
+        "dec_in": 18, "dec_out": 18,
+        "unit_size": 1.0,
+        "min_liquidity_usd": 50_000,
+    },
+    {
+        "name": "WETH/USDC",
+        "token_in":  "0x4200000000000000000000000000000000000006",
+        "token_out": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "dec_in": 18, "dec_out": 6,
+        "unit_size": 1.0,
+        "min_liquidity_usd": 200_000,
+    },
+    {
+        "name": "USDC/USDbC",
+        "token_in":  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "token_out": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
+        "dec_in": 6, "dec_out": 6,
+        "unit_size": 1000.0,
+        "min_liquidity_usd": 100_000,
+    },
+    {
+        "name": "DAI/USDC",
+        "token_in":  "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
+        "token_out": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "dec_in": 18, "dec_out": 6,
+        "unit_size": 1000.0,
+        "min_liquidity_usd": 50_000,
+    },
+    {
+        "name": "AERO/WETH",
+        "token_in":  "0x940181a94A35A4569E4529A3CDfB74e38FD98631",
+        "token_out": "0x4200000000000000000000000000000000000006",
+        "dec_in": 18, "dec_out": 18,
+        "unit_size": 1000.0,
+        "min_liquidity_usd": 50_000,
+    },
+    {
+        "name": "DEGEN/WETH",
+        "token_in":  "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed",
+        "token_out": "0x4200000000000000000000000000000000000006",
+        "dec_in": 18, "dec_out": 18,
+        "unit_size": 100_000.0,
+        "min_liquidity_usd": 30_000,
+    },
+    {
+        "name": "BRETT/WETH",
+        "token_in":  "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+        "token_out": "0x4200000000000000000000000000000000000006",
+        "dec_in": 18, "dec_out": 18,
+        "unit_size": 100_000.0,
+        "min_liquidity_usd": 30_000,
+    },
+    {
+        "name": "VIRTUAL/WETH",
+        "token_in":  "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b",
+        "token_out": "0x4200000000000000000000000000000000000006",
+        "dec_in": 18, "dec_out": 18,
+        "unit_size": 1000.0,
+        "min_liquidity_usd": 30_000,
+    },
+    {
+        "name": "TOSHI/WETH",
+        "token_in":  "0xAC1Bd2486aAf3B5C0fc3Fd868558b082a531B2B4",
+        "token_out": "0x4200000000000000000000000000000000000006",
+        "dec_in": 18, "dec_out": 18,
+        "unit_size": 1_000_000.0,
+        "min_liquidity_usd": 20_000,
+    },
+    {
+        "name": "cbXRP/USDC",
+        "token_in":  "0x4B4143fBe6823D0f21882Ba4B53a5E7C11a7B395",
+        "token_out": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "dec_in": 18, "dec_out": 6,
+        "unit_size": 1000.0,
+        "min_liquidity_usd": 20_000,
+    },
+    {
+        "name": "MOG/WETH",
+        "token_in":  "0x2Da56AcB9Ea78330f947bD57C54119Debda7AF71",
+        "token_out": "0x4200000000000000000000000000000000000006",
+        "dec_in": 18, "dec_out": 18,
+        "unit_size": 10_000_000.0,
+        "min_liquidity_usd": 20_000,
+    },
+    {
+        "name": "HIGHER/WETH",
+        "token_in":  "0x0578d8A44db98B23BF096A382e016e29a5Ce0ffe",
+        "token_out": "0x4200000000000000000000000000000000000006",
+        "dec_in": 18, "dec_out": 18,
+        "unit_size": 100_000.0,
+        "min_liquidity_usd": 20_000,
+    },
+]
+
+# ── DEX config — 5 DEXes on Base ──────────────────────────────────────────────
+DEX_CONFIG = [
+    {
+        "name": "Aerodrome Slipstream",
+        "type": "slipstream",          # Uniswap V3 CL fork, uses slot0 for price
+        "factory": "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A",
+        "router":  "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
+        "quoter":  None,               # no separate quoter; uses slot0
+        "tick_spacings": [1, 50, 100, 200],
+        "fee_pct": 0.0001,             # typical for tick_spacing=1
+    },
+    {
+        "name": "Uniswap V3",
+        "type": "uniswap_v3",
+        "factory": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+        "router":  "0x2626664c2603336E57B271c5C0b26F421741e481",
+        "quoter":  "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
+        "fee_tiers": [100, 500, 3000, 10000],
+    },
+    {
+        "name": "Aerodrome vAMM",      # Uniswap V2 style
+        "type": "uniswap_v2",
+        "factory": "0x420DD381b31aEf6683db6B902084cB0FFECe40Da",
+        "router":  "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
+        "fee_pct": 0.0002,
+    },
+    {
+        "name": "BaseSwap",
+        "type": "uniswap_v3",
+        "factory": "0x38015D05f4fEC8AFe15D7cc0386a126574e8077B",
+        "router":  "0x1B8eea9315bE495187D873DA7773a57b96a6d969",
+        "quoter":  "0x4fDBD73aD4B1DDde594BF05497C15f76308eFfb9",
+        "fee_tiers": [500, 3000],
+    },
+    {
+        "name": "PancakeSwap V3",
+        "type": "uniswap_v3",
+        "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
+        "router":  "0x1b81D678ffb9C0263b24A97847620C99d213eB14",
+        "quoter":  "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+        "fee_tiers": [100, 500, 2500, 10000],
+    },
+]
+
+# ── Flash loan providers (priority order) ─────────────────────────────────────
+FLASH_LOAN_PROVIDERS = [
+    {
+        "name": "Morpho",
+        "address": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
+        "fee_pct": 0.0,
+        "callback": "onMorphoFlashLoan",
+        "priority": 1,
+    },
+    {
+        "name": "Balancer",
+        "address": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
+        "fee_pct": 0.0,
+        "callback": "receiveFlashLoan",
+        "priority": 2,
+    },
+]
 
 
 def validate() -> None:

@@ -151,31 +151,35 @@ def test_main_loop_does_not_crash_on_price_error():
     run_cycle must catch price fetch exceptions and continue — never crash.
     """
     import main as main_module
+    from main import CycleStats
 
     w3_mock = MagicMock()
+    stats = CycleStats()
 
     # Simulate price fetch failure
     with patch("main.get_all_prices", side_effect=Exception("RPC timeout")), \
          patch("main.config.LOG_DIR", "/tmp/dex_arb_test_logs"):
         # Should not raise
-        main_module.run_cycle(w3_mock)
+        main_module.run_cycle(w3_mock, stats)
+
+    assert stats.cycles == 0  # Nothing recorded since prices failed
 
 
 def test_main_loop_does_not_crash_on_detect_error():
-    """run_cycle must catch detect_opportunity exceptions."""
+    """run_cycle must catch detect_all_opportunities exceptions."""
     import main as main_module
     from price_scanner import PriceQuote
 
     mock_prices = {
-        "cbBTC/USDC": (
+        "cbBTC/USDC": [
             PriceQuote("aerodrome", "cbBTC/USDC", 68297.0, 0.0001, 1, time.time()),
             PriceQuote("uniswap",   "cbBTC/USDC", 68193.0, 0.0005, 1, time.time()),
-        )
+        ]
     }
     w3_mock = MagicMock()
 
     with patch("main.get_all_prices", return_value=mock_prices), \
-         patch("main.detect_opportunity", side_effect=Exception("detector crash")), \
+         patch("main.detect_all_opportunities", side_effect=Exception("detector crash")), \
          patch("main.config.LOG_DIR", "/tmp/dex_arb_test_logs"):
         main_module.run_cycle(w3_mock)  # must not raise
 
@@ -184,13 +188,13 @@ def test_main_loop_logs_profitable_opportunity(tmp_path):
     """run_cycle must call log_opportunity when a profitable opp is detected."""
     import main as main_module
     from price_scanner import PriceQuote
-    from arb_detector import ArbOpportunity
+    from arb_detector import ArbOpportunity, SimResult
 
     mock_prices = {
-        "cbBTC/USDC": (
+        "cbBTC/USDC": [
             PriceQuote("aerodrome", "cbBTC/USDC", 68297.0, 0.0001, 1, time.time()),
             PriceQuote("uniswap",   "cbBTC/USDC", 68193.0, 0.0005, 1, time.time()),
-        )
+        ]
     }
     profitable_opp = ArbOpportunity(
         pair="cbBTC/USDC", buy_venue="uniswap", sell_venue="aerodrome",
@@ -199,14 +203,22 @@ def test_main_loop_logs_profitable_opportunity(tmp_path):
         flash_loan_usdc=34000.0, estimated_profit_usdc=31.14,
         is_profitable=True, timestamp=time.time(),
     )
+    mock_sim = SimResult(
+        buy_dex="uniswap", sell_dex="aerodrome",
+        token_amount=0.249, usdc_in=34000.0, usdc_out=34031.0,
+        gross_profit_usd=31.0, gas_cost_usd=0.5, net_profit_usd=30.5,
+        flash_provider="Morpho", is_executable=False,
+        rejection_reason="EXECUTE_MODE=false",
+    )
     w3_mock = MagicMock()
 
     logged_tags = []
-    def mock_log(opp, tag):
+    def mock_log(opp, tag, sim=None):
         logged_tags.append(tag)
 
     with patch("main.get_all_prices", return_value=mock_prices), \
-         patch("main.detect_opportunity", return_value=profitable_opp), \
+         patch("main.detect_all_opportunities", return_value=[profitable_opp]), \
+         patch("main.simulate_arb", return_value=mock_sim), \
          patch("main.log_opportunity", side_effect=mock_log), \
          patch("main.should_execute", return_value=(False, "EXECUTE_MODE=false")), \
          patch("main.config.MIN_NET_PROFIT_USD", 10.0), \
