@@ -250,13 +250,15 @@ def run_cycle(w3_read: Web3, w3_exec: Web3 = None, stats: CycleStats = None) -> 
     profitable: list = []
     top_opp: ArbOpportunity = None
     top_sim: SimResult = None
+    rpc_errors = 0
 
     try:
         # ── Price fetch ───────────────────────────────────────────────────────
         try:
             prices = get_all_prices(w3_read)
         except Exception as exc:
-            logger.error("Price fetch failed: %s", exc)
+            rpc_errors += 1
+            logger.warning("price_fetch_failed | error=%s", exc)
             return
         t_prices = time.time()
 
@@ -335,6 +337,7 @@ def run_cycle(w3_read: Web3, w3_exec: Web3 = None, stats: CycleStats = None) -> 
             f"total={t_total - t_start:.2f}s | "
             f"pairs={len(prices)} | "
             f"candidates={len(profitable)} | "
+            f"rpc_errors={rpc_errors} | "
             f"top_pair={top_opp.pair if top_opp else 'none'}"
         )
 

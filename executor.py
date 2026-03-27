@@ -200,13 +200,11 @@ def log_opportunity(opp: ArbOpportunity, tag: str, sim: SimResult = None) -> Non
     Append one opportunity record to logs/executions.jsonl.
 
     tag values:
-        EXECUTABLE  — sim passed; execution pending or attempted
-        DRY         — would execute, but DRY_RUN=true or contract not deployed
+        DRY         — tx built but not sent (DRY_RUN=true)
         SKIP        — sim passed but should_execute() returned False
         SENT        — tx submitted on-chain
+        STUB        — contract not deployed, scan-only mode
         ERROR       — exception during execution
-        PROFITABLE  — backward-compat: sim not yet run (legacy path)
-        BELOW_THRESHOLD — spread too small
     """
     log_dir = _ensure_log_dir()
     path = log_dir / "executions.jsonl"
@@ -329,7 +327,6 @@ def execute_arb(w3_exec, opp: ArbOpportunity, sim: SimResult,
         )
 
         if dry_run or config.DRY_RUN:
-            log_opportunity(opp, "DRY", sim)
             return ExecutionResult(
                 tag="DRY",
                 reason=f"to={tx['to']} gas={tx['gas']}",
@@ -365,7 +362,6 @@ def execute_arb(w3_exec, opp: ArbOpportunity, sim: SimResult,
         except Exception:
             pass
 
-        log_opportunity(opp, "SENT", sim)
         return ExecutionResult(
             tag="SENT",
             tx_hash=tx_hash.hex(),
@@ -375,5 +371,4 @@ def execute_arb(w3_exec, opp: ArbOpportunity, sim: SimResult,
 
     except Exception as exc:
         logger.error("execute_arb failed for %s: %s", opp.pair, exc, exc_info=True)
-        log_opportunity(opp, "ERROR", sim)
         return ExecutionResult(tag="ERROR", error=str(exc))

@@ -414,6 +414,31 @@ def _evaluate_pair_best(
                 )
             # Use depth-discovered size (may be smaller than tier default)
             flash_loan_usdc = max_size
+        else:
+            # DEX config missing for at least one venue — cannot validate pool depth.
+            # Reject rather than let an unchecked opp reach simulate_arb.
+            logger.debug(
+                "DEPTH_REJECTED | %s | buy=%s sell=%s | "
+                "dex_cfg not found (pair_cfg=%s buy_cfg=%s sell_cfg=%s)",
+                pair, buy_quote.venue, sell_quote.venue,
+                pair_cfg is not None, buy_dex_cfg is not None, sell_dex_cfg is not None,
+            )
+            return ArbOpportunity(
+                pair=pair,
+                buy_venue=buy_quote.venue,
+                sell_venue=sell_quote.venue,
+                buy_price=buy_price,
+                sell_price=sell_price,
+                gross_spread_pct=gross_spread_pct,
+                total_fee_pct=total_fee_pct,
+                net_spread_pct=net_spread_pct,
+                flash_loan_usdc=0.0,
+                estimated_profit_usdc=0.0,
+                is_profitable=False,
+                timestamp=time.time(),
+                tier="DEPTH_REJECTED",
+                cost=cost,
+            )
             cost = compute_cost_breakdown(
                 gross_spread_pct=gross_spread_pct,
                 lp_fee_buy_pct=buy_quote.fee_pct * 100.0,
