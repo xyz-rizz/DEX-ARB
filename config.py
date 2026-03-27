@@ -322,11 +322,12 @@ _ARBITRUM_DEX_CONFIG = [
         "fee_tiers": [100, 500, 3000, 10000],
     },
     {
-        "name": "Camelot V2",          # Largest native Arbitrum AMM (Uniswap V2 fork)
-        "type": "uniswap_v2",
-        "factory": "0x6EcCab422D763aC031210895C81787E87B43A652",
-        "router":  "0xc873fEcbd354f5A56E00E710B90EF4201db2448d",
-        "fee_pct": 0.003,              # 0.3% default swap fee
+        "name": "PancakeSwap V3",       # Active Uniswap V3 fork on Arbitrum
+        "type": "uniswap_v3",
+        "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
+        "router":  "0x1b81D678ffb9C0263b24A97847620C99d213eB14",
+        "quoter":  "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+        "fee_tiers": [100, 500, 10000],  # 2500 tier has thin pools; skip it
     },
 ]
 

@@ -125,7 +125,7 @@ def test_arbitrum_dex_config_has_2_venues():
 
 def test_arbitrum_dex_names():
     names = {d["name"] for d in config._ARBITRUM_DEX_CONFIG}
-    assert names == {"Uniswap V3", "Camelot V2"}
+    assert names == {"Uniswap V3", "PancakeSwap V3"}
 
 
 def test_arbitrum_uniswap_v3_config():
@@ -140,13 +140,16 @@ def test_arbitrum_uniswap_v3_config():
     Web3.to_checksum_address(uni["quoter"])
 
 
-def test_arbitrum_camelot_v2_config():
-    cam = next(d for d in config._ARBITRUM_DEX_CONFIG if d["name"] == "Camelot V2")
-    assert cam["type"] == "uniswap_v2"
-    assert cam["factory"].lower() == "0x6eccab422d763ac031210895c81787e87b43a652"
-    assert cam["fee_pct"] == pytest.approx(0.003)
-    Web3.to_checksum_address(cam["factory"])
-    Web3.to_checksum_address(cam["router"])
+def test_arbitrum_pancakeswap_v3_config():
+    """PancakeSwap V3 replaced Camelot V2 — active liquidity, same UniV3 interface."""
+    pcx = next(d for d in config._ARBITRUM_DEX_CONFIG if d["name"] == "PancakeSwap V3")
+    assert pcx["type"] == "uniswap_v3"
+    assert pcx["factory"].lower() == "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865"
+    assert pcx["quoter"].lower()  == "0xb048bbc1ee6b733fffcfb9e9cef7375518e25997"
+    assert 500 in pcx["fee_tiers"]
+    Web3.to_checksum_address(pcx["factory"])
+    Web3.to_checksum_address(pcx["router"])
+    Web3.to_checksum_address(pcx["quoter"])
 
 
 def test_aerodrome_absent_from_arbitrum_dex_config():
@@ -154,6 +157,7 @@ def test_aerodrome_absent_from_arbitrum_dex_config():
     assert "Aerodrome Slipstream" not in names
     assert "Aerodrome vAMM"       not in names
     assert "BaseSwap"             not in names
+    assert "Camelot V2"           not in names  # thin liquidity; replaced by PancakeSwap V3
 
 
 # ── 4. Arbitrum flash-loan providers ──────────────────────────────────────────

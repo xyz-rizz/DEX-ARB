@@ -140,6 +140,21 @@ _FACTORY_V2_ABI = [
     }
 ]
 
+# Standard Uniswap V2 factory — 2-arg getPair (no stable bool).
+# Used for non-Aerodrome V2 forks (e.g. Camelot V2 on Arbitrum).
+_FACTORY_V2_STANDARD_ABI = [
+    {
+        "inputs": [
+            {"name": "tokenA", "type": "address"},
+            {"name": "tokenB", "type": "address"},
+        ],
+        "name": "getPair",
+        "outputs": [{"name": "pair", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+
 _POOL_V2_ABI = [
     {
         "inputs": [],
@@ -218,6 +233,7 @@ _pool_cache_initialized: bool = False
 _SEL_GETPOOL_TICK = Web3.keccak(text="getPool(address,address,int24)")[:4]
 _SEL_GETPOOL_FEE  = Web3.keccak(text="getPool(address,address,uint24)")[:4]
 _SEL_GETPAIR      = Web3.keccak(text="getPair(address,address,bool)")[:4]
+_SEL_GETPAIR_STD  = Web3.keccak(text="getPair(address,address)")[:4]  # standard Uniswap V2
 _SEL_QUOTE_SLIP   = Web3.keccak(
     text="quoteExactInputSingle((address,address,uint256,int24,uint160))"
 )[:4]
@@ -379,8 +395,22 @@ def _get_slipstream_pool(w3: Web3, token_a: str, token_b: str,
 
 
 def _get_v2_pair(w3: Web3, token_a: str, token_b: str,
-                 factory: str, stable: bool = False) -> str:
-    """Look up an Aerodrome vAMM pair via factory.getPair()."""
+                 factory: str, stable: bool = False,
+                 standard: bool = False) -> str:
+    """Look up a V2 pair via factory.getPair().
+
+    standard=True  → standard Uniswap V2 interface: getPair(tokenA, tokenB)
+    standard=False → Aerodrome vAMM interface: getPair(tokenA, tokenB, stable)
+    """
+    if standard:
+        f = w3.eth.contract(
+            address=Web3.to_checksum_address(factory),
+            abi=_FACTORY_V2_STANDARD_ABI,
+        )
+        return f.functions.getPair(
+            Web3.to_checksum_address(token_a),
+            Web3.to_checksum_address(token_b),
+        ).call()
     f = w3.eth.contract(
         address=Web3.to_checksum_address(factory),
         abi=_FACTORY_V2_ABI,
@@ -604,8 +634,11 @@ def _quote_uniswap_v2(
     fee_pct   = dex_cfg.get("fee_pct", 0.0002)
     amount_in = int(unit_size * (10 ** dec_in))
 
+    standard_v2 = dex_cfg.get("standard_v2", False)
     try:
-        pair_addr = _get_v2_pair(w3, token_in, token_out, factory, stable=False)
+        pair_addr = _get_v2_pair(
+            w3, token_in, token_out, factory, stable=False, standard=standard_v2
+        )
     except Exception:
         return None
     if not pair_addr or pair_addr == _ZERO_ADDRESS:
@@ -836,9 +869,14 @@ def _populate_pool_cache(w3: Web3) -> None:
 
             elif dex_type == "uniswap_v2":
                 key = (pair_name, dex_name, "v2")
-                cd  = _SEL_GETPAIR + abi_encode(
-                    ["address", "address", "bool"], [token_in, token_out, False]
-                )
+                if dex_cfg.get("standard_v2", False):
+                    cd = _SEL_GETPAIR_STD + abi_encode(
+                        ["address", "address"], [token_in, token_out]
+                    )
+                else:
+                    cd = _SEL_GETPAIR + abi_encode(
+                        ["address", "address", "bool"], [token_in, token_out, False]
+                    )
                 calls.append({"target": factory, "callData": cd})
                 call_keys.append(key)
 
