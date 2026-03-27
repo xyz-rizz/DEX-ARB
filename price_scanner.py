@@ -1,7 +1,8 @@
 """
 Price scanner for DEX Arbitrage Bot.
-Reads prices from Aerodrome Slipstream (slot0), Uniswap V3 forks (QuoterV2),
-and Aerodrome vAMM (getReserves). Supports 15 pairs × 5 DEXes.
+Reads execution quotes from Aerodrome Slipstream (CLQuoter), Uniswap V3 forks
+(QuoterV2), and Aerodrome vAMM (getAmountOut). Supports 15 pairs × 5 DEXes.
+All quotes are execution quotes (include slippage for unit_size tokens).
 Uses CDP RPC for all reads — never uses Alchemy for price queries.
 Never imports from the morpho_scanner liquidation bot.
 """
@@ -46,6 +47,35 @@ _QUOTER_V2_ABI = [
                     {"name": "tokenOut",          "type": "address"},
                     {"name": "amountIn",          "type": "uint256"},
                     {"name": "fee",               "type": "uint24"},
+                    {"name": "sqrtPriceLimitX96", "type": "uint160"},
+                ],
+                "name": "params",
+                "type": "tuple",
+            }
+        ],
+        "name": "quoteExactInputSingle",
+        "outputs": [
+            {"name": "amountOut",               "type": "uint256"},
+            {"name": "sqrtPriceX96After",       "type": "uint160"},
+            {"name": "initializedTicksCrossed", "type": "uint32"},
+            {"name": "gasEstimate",             "type": "uint256"},
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+# Aerodrome Slipstream CLQuoter — uses tickSpacing (int24) instead of fee (uint24).
+# Interface: quoteExactInputSingle({tokenIn, tokenOut, amountIn, tickSpacing, sqrtPriceLimitX96})
+_SLIPSTREAM_QUOTER_ABI = [
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"name": "tokenIn",           "type": "address"},
+                    {"name": "tokenOut",          "type": "address"},
+                    {"name": "amountIn",          "type": "uint256"},
+                    {"name": "tickSpacing",       "type": "int24"},
                     {"name": "sqrtPriceLimitX96", "type": "uint160"},
                 ],
                 "name": "params",
@@ -127,6 +157,18 @@ _POOL_V2_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    # getAmountOut — execution quote that includes the vAMM invariant and fee.
+    # Replaces the spot-price reserves ratio for arb detection.
+    {
+        "inputs": [
+            {"name": "amountIn", "type": "uint256"},
+            {"name": "tokenIn",  "type": "address"},
+        ],
+        "name": "getAmountOut",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
 ]
 
 _ERC20_BALANCE_ABI = [
@@ -173,12 +215,14 @@ class PriceQuote:
     fee_pct: float     # e.g. 0.0001 for 0.01%
     block: int
     timestamp: float
+    method: str = "execution"  # "execution" = quoter-based (includes slippage)
+                               # "spot"      = slot0 or reserves ratio (no slippage)
 
     def __repr__(self) -> str:
         return (
             f"PriceQuote({self.venue} {self.pair} "
             f"price={self.price:.6f} fee={self.fee_pct*100:.3f}% "
-            f"block={self.block})"
+            f"method={self.method} block={self.block})"
         )
 
 
@@ -228,6 +272,7 @@ def get_aerodrome_price(
         fee_pct=fee_pct,
         block=block,
         timestamp=time.time(),
+        method="spot",  # slot0-based: no slippage, not an execution quote
     )
 
 
@@ -276,6 +321,7 @@ def get_uniswap_price(
         fee_pct=fee_pct,
         block=block,
         timestamp=time.time(),
+        method="execution",
     )
 
 
@@ -386,17 +432,26 @@ def _quote_slipstream(
     dex_cfg: dict,
 ) -> Optional[PriceQuote]:
     """
-    Price a pair on Aerodrome Slipstream (V3 CL fork).
-    Tries all tick_spacings; returns the quote with the best (highest) sell price.
+    Price a pair on Aerodrome Slipstream using the CLQuoter (execution quote).
+
+    Replaces the old slot0/sqrtPriceX96 approach which returned a spot price
+    with no slippage — incomparable against V3 QuoterV2 execution quotes.
+
+    Tries all tick_spacings; returns the highest-priced execution quote.
+    unit_size from pair_cfg is used so all DEX adapters quote identical amounts.
     """
-    token_in  = pair_cfg["token_in"]
-    token_out = pair_cfg["token_out"]
-    dec_in    = pair_cfg["dec_in"]
-    dec_out   = pair_cfg["dec_out"]
-    factory   = dex_cfg["factory"]
+    token_in     = pair_cfg["token_in"]
+    token_out    = pair_cfg["token_out"]
+    dec_in       = pair_cfg["dec_in"]
+    dec_out      = pair_cfg["dec_out"]
+    unit_size    = pair_cfg["unit_size"]
+    amount_in    = int(unit_size * (10 ** dec_in))
+    factory      = dex_cfg["factory"]
+    quoter_addr  = dex_cfg.get("quoter") or config.AERODROME_SLIPSTREAM_QUOTER
     best: Optional[PriceQuote] = None
 
     for ts in dex_cfg.get("tick_spacings", [1, 50, 100, 200]):
+        # Step 1: find the pool (needed only for the liquidity gate)
         try:
             pool_addr = _get_slipstream_pool(w3, token_in, token_out, ts, factory)
         except Exception:
@@ -406,30 +461,46 @@ def _quote_slipstream(
         if not _check_liquidity(w3, pool_addr, token_in, token_out, dec_in, dec_out,
                                  pair_cfg["min_liquidity_usd"]):
             continue
-        try:
-            # Determine token order in pool by inspecting sqrtPriceX96 direction
-            # We need token0/token1 relationship.  Use sorted addresses as proxy.
-            t0_is_token_in = token_in.lower() < token_out.lower()
-            if t0_is_token_in:
-                t0_dec, t1_dec, inv = dec_in, dec_out, False
-            else:
-                t0_dec, t1_dec, inv = dec_out, dec_in, True
 
+        # Step 2: call CLQuoter for an execution quote (tickSpacing, not fee)
+        try:
             fee = _TICK_SPACING_FEE.get(ts, dex_cfg.get("fee_pct", 0.0001))
-            q = get_aerodrome_price(
-                w3=w3,
-                pool_address=pool_addr,
-                token0_decimals=t0_dec,
-                token1_decimals=t1_dec,
-                invert=inv,
-                pair=pair_cfg["name"],
-                fee_pct=fee,
+            quoter = w3.eth.contract(
+                address=Web3.to_checksum_address(quoter_addr),
+                abi=_SLIPSTREAM_QUOTER_ABI,
             )
-            q.venue = dex_cfg["name"]
-            if q.price > 0 and (best is None or q.price > best.price):
+            result = quoter.functions.quoteExactInputSingle({
+                "tokenIn":           Web3.to_checksum_address(token_in),
+                "tokenOut":          Web3.to_checksum_address(token_out),
+                "amountIn":          amount_in,
+                "tickSpacing":       ts,
+                "sqrtPriceLimitX96": 0,
+            }).call()
+
+            amount_out_raw   = result[0]
+            block            = w3.eth.block_number
+            amount_in_human  = amount_in / (10 ** dec_in)
+            amount_out_human = amount_out_raw / (10 ** dec_out)
+            price = amount_out_human / amount_in_human if amount_in_human > 0 else 0.0
+
+            if price <= 0:
+                continue
+
+            q = PriceQuote(
+                venue=dex_cfg["name"],
+                pair=pair_cfg["name"],
+                price=price,
+                fee_pct=fee,
+                block=block,
+                timestamp=time.time(),
+                method="execution",
+            )
+            if best is None or q.price > best.price:
                 best = q
+
         except Exception as e:
-            logger.debug("slipstream quote failed ts=%d pair=%s: %s", ts, pair_cfg["name"], e)
+            logger.debug("slipstream quoter failed ts=%d pair=%s: %s",
+                         ts, pair_cfg["name"], e)
 
     return best
 
@@ -493,15 +564,23 @@ def _quote_uniswap_v2(
     dex_cfg: dict,
 ) -> Optional[PriceQuote]:
     """
-    Price a pair on an Aerodrome vAMM (Uniswap V2 style).
-    Uses getReserves() from the pool contract.
+    Price a pair on Aerodrome vAMM using getAmountOut() (execution quote).
+
+    Replaces the old reserves-ratio approach which returned a spot price with no
+    slippage — incomparable against V3 QuoterV2 execution quotes.
+
+    getAmountOut(amountIn, tokenIn) returns the actual tokens out including the
+    vAMM invariant and the 0.02% swap fee.
+    unit_size from pair_cfg is used so all DEX adapters quote identical amounts.
     """
     token_in  = pair_cfg["token_in"]
     token_out = pair_cfg["token_out"]
     dec_in    = pair_cfg["dec_in"]
     dec_out   = pair_cfg["dec_out"]
+    unit_size = pair_cfg["unit_size"]
     factory   = dex_cfg["factory"]
     fee_pct   = dex_cfg.get("fee_pct", 0.0002)
+    amount_in = int(unit_size * (10 ** dec_in))
 
     try:
         pair_addr = _get_v2_pair(w3, token_in, token_out, factory, stable=False)
@@ -518,33 +597,31 @@ def _quote_uniswap_v2(
             address=Web3.to_checksum_address(pair_addr),
             abi=_POOL_V2_ABI,
         )
-        token0_addr = pool.functions.token0().call().lower()
-        reserves = pool.functions.getReserves().call()
-        r0, r1 = reserves[0], reserves[1]
+        amount_out_raw = pool.functions.getAmountOut(
+            amount_in,
+            Web3.to_checksum_address(token_in),
+        ).call()
 
-        if token0_addr == token_in.lower():
-            reserve_in, reserve_out = r0, r1
-        else:
-            reserve_in, reserve_out = r1, r0
-
-        if reserve_in == 0:
+        if amount_out_raw == 0:
             return None
 
-        # Uniswap V2 price: token_out per token_in (human units)
-        price = (reserve_out / (10 ** dec_out)) / (reserve_in / (10 ** dec_in))
+        amount_in_human  = amount_in / (10 ** dec_in)
+        amount_out_human = amount_out_raw / (10 ** dec_out)
+        price = amount_out_human / amount_in_human if amount_in_human > 0 else 0.0
         block = w3.eth.block_number
 
-        q = PriceQuote(
+        return PriceQuote(
             venue=dex_cfg["name"],
             pair=pair_cfg["name"],
             price=price,
             fee_pct=fee_pct,
             block=block,
             timestamp=time.time(),
+            method="execution",
         )
-        return q
     except Exception as e:
-        logger.debug("v2 quote failed pair=%s dex=%s: %s", pair_cfg["name"], dex_cfg["name"], e)
+        logger.debug("v2 getAmountOut failed pair=%s dex=%s: %s",
+                     pair_cfg["name"], dex_cfg["name"], e)
         return None
 
 

@@ -59,13 +59,17 @@ logger = logging.getLogger("main")
 def _print_banner() -> None:
     mode = "EXECUTE" if config.EXECUTE_MODE else "SCAN_ONLY"
     pair_names = [p["name"] for p in config.PAIR_CONFIG]
+    if config.EXECUTION_READY:
+        exec_line = f"  EXECUTION: READY | contract={config.ARB_EXECUTOR_ADDRESS}"
+    else:
+        exec_line = "  EXECUTION: DISABLED (no contract deployed — set ARB_EXECUTOR_ADDRESS)"
     print(
         f"\n{'='*70}\n"
         f"  ARB_BOT | pairs={','.join(pair_names[:4])}...({len(pair_names)} total)\n"
         f"  mode={mode} | dexes={len(config.DEX_CONFIG)} | min_spread={config.MIN_SPREAD_PCT:.3f}%\n"
         f"  min_profit=${config.MIN_NET_PROFIT_USD:.2f} | interval={config.SCAN_INTERVAL_SECONDS}s\n"
         f"  wallet={config.WALLET_ADDRESS}\n"
-        f"  contract={'(not deployed)' if not config.ARB_EXECUTOR_ADDRESS else config.ARB_EXECUTOR_ADDRESS}\n"
+        f"{exec_line}\n"
         f"{'='*70}\n"
     )
 
@@ -83,25 +87,30 @@ _TIER_EMOJI = {
 
 # ── Per-cycle scan ────────────────────────────────────────────────────────────
 
-def _log_scan_line(opp: ArbOpportunity) -> None:
-    """Print ARB_SCAN line for one opportunity. Always shows real profit."""
-    tier_str = _TIER_EMOJI.get(opp.tier, opp.tier)
+def _log_scan_line(opp: ArbOpportunity, sim: SimResult = None) -> None:
+    """Print ARB_SCAN line for one opportunity. Shows sim result when provided."""
     # Suppress weETH noise below 0.05% at DEBUG level only
     if "weETH" in opp.pair and opp.net_spread_pct < 0.05:
         logger.debug(
-            "ARB_SCAN | %s | spread=%.4f%% net=%.4f%% | %s (suppressed)",
-            opp.pair, opp.gross_spread_pct, opp.net_spread_pct, tier_str,
+            "ARB_SCAN | %s | spread=%.4f%% net=%.4f%% (suppressed)",
+            opp.pair, opp.gross_spread_pct, opp.net_spread_pct,
         )
         return
 
+    if sim is not None and not sim.is_executable:
+        tier_str = f"❌ SIM_REJECTED ({sim.rejection_reason})"
+    else:
+        tier_str = _TIER_EMOJI.get(opp.tier, opp.tier)
+
     flash_k = f"${opp.flash_loan_usdc/1000:.0f}k" if opp.flash_loan_usdc >= 1000 else f"${opp.flash_loan_usdc:.0f}"
+    sim_suffix = f" | sim_net=${sim.net_profit_usd:.2f}" if sim is not None else ""
     print(
         f"ARB_SCAN | {opp.pair} | "
         f"{opp.buy_venue[:6]}={opp.buy_price:.8g} "
         f"{opp.sell_venue[:6]}={opp.sell_price:.8g} | "
         f"spread={opp.gross_spread_pct:.4f}% net={opp.net_spread_pct:.4f}% | "
         f"flash={flash_k} | "
-        f"profit=${opp.estimated_profit_usdc:.2f} | {tier_str}"
+        f"profit=${opp.estimated_profit_usdc:.2f}{sim_suffix} | {tier_str}"
     )
 
 
@@ -208,8 +217,8 @@ class CycleStats:
 
 # ── Main cycle ────────────────────────────────────────────────────────────────
 
-def run_cycle(w3_read: Web3, stats: CycleStats = None) -> None:
-    """Execute one scan cycle — fetch prices, detect opportunities, log and optionally execute."""
+def run_cycle(w3_read: Web3, w3_exec: Web3 = None, stats: CycleStats = None) -> None:
+    """Execute one scan cycle — fetch prices, detect, simulate, log, optionally execute."""
     try:
         prices = get_all_prices(w3_read)
     except Exception as exc:
@@ -231,47 +240,47 @@ def run_cycle(w3_read: Web3, stats: CycleStats = None) -> None:
         logger.error("detect_all_opportunities failed: %s", exc)
         return
 
-    # Log scan line for every opportunity (profitable or not)
-    for opp in all_opps:
-        try:
-            _log_scan_line(opp)
-        except Exception as exc:
-            logger.error("scan line for %s failed: %s", opp.pair, exc)
-
-    # Log profitable ones to JSONL
+    # Simulate top profitable candidates BEFORE any logging
     profitable = [o for o in all_opps if o.is_profitable]
-    for opp in profitable:
-        try:
-            log_opportunity(opp, "PROFITABLE")
-        except Exception as exc:
-            logger.error("log_opportunity failed: %s", exc)
-
-    # Pick top 3 profitable for simulation
     top3 = profitable[:3]
-    top_sim: SimResult = None
-    top_opp: ArbOpportunity = None
+    sim_by_id: dict = {}  # id(opp) -> SimResult
 
     for opp in top3:
         try:
             sim = simulate_arb(w3_read, opp)
-            _log_best(opp, sim)
-
-            if top_sim is None or sim.net_profit_usd > top_sim.net_profit_usd:
-                top_sim = sim
-                top_opp = opp
-                top_opp.flash_provider = sim.flash_provider
+            sim_by_id[id(opp)] = sim
+            opp.flash_provider = sim.flash_provider
         except Exception as exc:
             logger.error("simulate_arb failed for %s: %s", opp.pair, exc)
 
-    # Execute only the #1 simulated opportunity
+    # Log ARB_SCAN for every opportunity (with sim result if available)
+    for opp in all_opps:
+        try:
+            _log_scan_line(opp, sim_by_id.get(id(opp)))
+        except Exception as exc:
+            logger.error("scan line for %s failed: %s", opp.pair, exc)
+
+    # Select the best candidate (by sim net profit)
+    top_sim: SimResult = None
+    top_opp: ArbOpportunity = None
+
+    for opp in top3:
+        sim = sim_by_id.get(id(opp))
+        if sim is None:
+            continue
+        if top_sim is None or sim.net_profit_usd > top_sim.net_profit_usd:
+            top_sim = sim
+            top_opp = opp
+
+    # Log ARB_BEST and write JSONL only if sim passed
     if top_opp and top_sim:
         try:
+            _log_best(top_opp, top_sim)
             execute, reason = should_execute(top_opp, top_sim)
             if execute:
-                result = execute_arb(top_opp, top_sim)
-                if not result["success"]:
-                    log_opportunity(top_opp, "DRY", top_sim)
-            else:
+                result = execute_arb(w3_exec, top_opp, top_sim)
+                log_opportunity(top_opp, result.tag, top_sim)
+            elif top_sim.is_executable:
                 log_opportunity(top_opp, "SKIP", top_sim)
                 logger.debug("SKIP: %s", reason)
         except Exception as exc:
@@ -297,6 +306,8 @@ def main() -> None:
         logger.critical("Cannot connect to CDP RPC: %s", config.BASE_RPC_URL)
         sys.exit(1)
 
+    w3_exec = Web3(Web3.HTTPProvider(config.ALCHEMY_EXEC_URL)) if config.ALCHEMY_EXEC_URL else None
+
     logger.info("Connected to Base mainnet — block %d", w3_read.eth.block_number)
     _print_banner()
 
@@ -307,7 +318,7 @@ def main() -> None:
         cycle += 1
         t0 = time.time()
         try:
-            run_cycle(w3_read, stats)
+            run_cycle(w3_read, w3_exec, stats)
         except Exception as exc:
             logger.error("Unhandled cycle error (cycle=%d): %s", cycle, exc)
 

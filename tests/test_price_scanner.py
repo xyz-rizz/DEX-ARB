@@ -360,35 +360,94 @@ def test_uniswap_v3_quote_for_new_pairs():
 
 
 def test_aerodrome_vamm_price_calculation():
-    """_quote_uniswap_v2 computes price from reserves correctly."""
+    """_quote_uniswap_v2 computes price from getAmountOut correctly."""
     from price_scanner import _quote_uniswap_v2
     w3 = MagicMock()
+
+    # unit_size for cbBTC/USDC = 0.1 cbBTC → amount_in = 10_000_000 raw
+    # For price = 68000: amount_out = 0.1 * 68000 * 1e6 = 6_800_000_000 raw USDC
+    pair_cfg = config.PAIR_CONFIG[0]  # cbBTC/USDC, token_in=cbBTC
+    expected_out = int(pair_cfg["unit_size"] * 68_000 * (10 ** pair_cfg["dec_out"]))
 
     def mock_contract(address=None, abi=None):
         m = MagicMock()
         # vAMM factory: return a valid pair address
         m.functions.getPair.return_value.call.return_value = "0x" + "D" * 40
-        # token0 = cbBTC address
-        m.functions.token0.return_value.call.return_value = config.CBBTC_ADDRESS
-        # reserves: 1 cbBTC, 68000 USDC (raw)
-        m.functions.getReserves.return_value.call.return_value = [
-            int(1 * 1e8),          # 1 cbBTC in raw
-            int(68_000 * 1e6),     # 68000 USDC in raw
-            0,
-        ]
+        # getAmountOut: execution quote → 68000 USDC per cbBTC
+        m.functions.getAmountOut.return_value.call.return_value = expected_out
         m.functions.balanceOf.return_value.call.return_value = int(68_000 * 1e6)
         return m
 
     w3.eth.contract.side_effect = mock_contract
     w3.eth.block_number = 2
 
-    pair_cfg = config.PAIR_CONFIG[0]  # cbBTC/USDC, token_in=cbBTC
-    dex_cfg  = next(d for d in config.DEX_CONFIG if d["name"] == "Aerodrome vAMM")
+    dex_cfg = next(d for d in config.DEX_CONFIG if d["name"] == "Aerodrome vAMM")
 
     with patch("price_scanner._check_liquidity", return_value=True):
         q = _quote_uniswap_v2(w3, pair_cfg, dex_cfg)
 
-    # price = (68000 USDC / 1 cbBTC) = 68000
     assert q is not None
     assert abs(q.price - 68000.0) < 1.0
     assert q.venue == "Aerodrome vAMM"
+    assert q.method == "execution"
+
+
+# ── New: execution-quote enforcement tests ────────────────────────────────────
+
+def test_aerodrome_uses_execution_quote_not_slot0():
+    """_quote_slipstream must call CLQuoter (method='execution'), not slot0 (method='spot')."""
+    from price_scanner import _quote_slipstream
+
+    w3 = MagicMock()
+    pair_cfg = config.PAIR_CONFIG[0]  # cbBTC/USDC
+    # amount_out for ~68000 price: unit_size * 68000 * 10^dec_out
+    expected_out = int(pair_cfg["unit_size"] * 68_000 * (10 ** pair_cfg["dec_out"]))
+
+    def mock_contract(address=None, abi=None):
+        m = MagicMock()
+        m.functions.getPool.return_value.call.return_value = "0x" + "A" * 40
+        m.functions.quoteExactInputSingle.return_value.call.return_value = [
+            expected_out, 0, 0, 100000
+        ]
+        return m
+
+    w3.eth.contract.side_effect = mock_contract
+    w3.eth.block_number = 1
+
+    dex_cfg = next(d for d in config.DEX_CONFIG if d["name"] == "Aerodrome Slipstream")
+
+    with patch("price_scanner._check_liquidity", return_value=True):
+        q = _quote_slipstream(w3, pair_cfg, dex_cfg)
+
+    assert q is not None, "CLQuoter must return a quote"
+    assert q.method == "execution", f"Expected method='execution', got '{q.method}'"
+
+
+def test_unit_size_consistent_across_dexes():
+    """Every pair in PAIR_CONFIG has a positive unit_size for consistent cross-DEX quotes."""
+    for pair_cfg in config.PAIR_CONFIG:
+        assert "unit_size" in pair_cfg, f"Missing unit_size in {pair_cfg['name']}"
+        assert pair_cfg["unit_size"] > 0, f"unit_size must be > 0 for {pair_cfg['name']}"
+        amount_in = int(pair_cfg["unit_size"] * (10 ** pair_cfg["dec_in"]))
+        assert amount_in > 0, f"amount_in must be > 0 for {pair_cfg['name']}"
+
+
+def test_price_quote_has_method_execution():
+    """PriceQuote default method is 'execution'; get_aerodrome_price returns 'spot'."""
+    q = PriceQuote("Uniswap V3", "cbBTC/USDC", 68000.0, 0.0005, 1, time.time())
+    assert q.method == "execution"
+
+    # get_aerodrome_price (slot0-based) must return method='spot'
+    w3 = MagicMock()
+    pool = MagicMock()
+    w3.eth.contract.return_value = pool
+    pool.functions.slot0.return_value.call.return_value = [
+        3033126396693973345289760393, 1, 0, 1, 1, 0, True
+    ]
+    w3.eth.block_number = 1
+    q_spot = get_aerodrome_price(
+        w3=w3, pool_address="0x" + "A" * 40,
+        token0_decimals=6, token1_decimals=8,
+        invert=True, pair="cbBTC/USDC", fee_pct=0.0001,
+    )
+    assert q_spot.method == "spot"

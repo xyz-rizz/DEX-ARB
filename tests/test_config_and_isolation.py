@@ -160,7 +160,7 @@ def test_main_loop_does_not_crash_on_price_error():
     with patch("main.get_all_prices", side_effect=Exception("RPC timeout")), \
          patch("main.config.LOG_DIR", "/tmp/dex_arb_test_logs"):
         # Should not raise
-        main_module.run_cycle(w3_mock, stats)
+        main_module.run_cycle(w3_mock, None, stats)
 
     assert stats.cycles == 0  # Nothing recorded since prices failed
 
@@ -207,8 +207,8 @@ def test_main_loop_logs_profitable_opportunity(tmp_path):
         buy_dex="uniswap", sell_dex="aerodrome",
         token_amount=0.249, usdc_in=34000.0, usdc_out=34031.0,
         gross_profit_usd=31.0, gas_cost_usd=0.5, net_profit_usd=30.5,
-        flash_provider="Morpho", is_executable=False,
-        rejection_reason="EXECUTE_MODE=false",
+        flash_provider="Morpho", is_executable=True,
+        rejection_reason="",
     )
     w3_mock = MagicMock()
 
@@ -225,4 +225,138 @@ def test_main_loop_logs_profitable_opportunity(tmp_path):
          patch("main.config.LOG_DIR", str(tmp_path)):
         main_module.run_cycle(w3_mock)
 
-    assert "PROFITABLE" in logged_tags
+    assert "SKIP" in logged_tags
+
+
+# ── New: lifecycle ordering + JSONL gate tests ────────────────────────────────
+
+def test_arb_scan_logged_after_simulation():
+    """simulate_arb must be called BEFORE _log_scan_line in run_cycle."""
+    import main as main_module
+    from price_scanner import PriceQuote
+    from arb_detector import ArbOpportunity, SimResult
+
+    profitable_opp = ArbOpportunity(
+        pair="cbBTC/USDC", buy_venue="uniswap", sell_venue="aerodrome",
+        buy_price=68193.0, sell_price=68297.0,
+        gross_spread_pct=0.15, total_fee_pct=0.06, net_spread_pct=0.09,
+        flash_loan_usdc=34000.0, estimated_profit_usdc=30.0,
+        is_profitable=True, timestamp=time.time(),
+    )
+    mock_sim = SimResult(
+        buy_dex="uniswap", sell_dex="aerodrome",
+        token_amount=0.1, usdc_in=34000.0, usdc_out=34030.0,
+        gross_profit_usd=30.0, gas_cost_usd=0.5, net_profit_usd=29.5,
+        flash_provider="Morpho", is_executable=False, rejection_reason="no_contract",
+    )
+    mock_prices = {"cbBTC/USDC": [
+        PriceQuote("aerodrome", "cbBTC/USDC", 68297.0, 0.0001, 1, time.time()),
+        PriceQuote("uniswap",   "cbBTC/USDC", 68193.0, 0.0005, 1, time.time()),
+    ]}
+
+    call_order = []
+
+    def record_sim(w3, opp):
+        call_order.append("simulate")
+        return mock_sim
+
+    def record_scan(opp, sim=None):
+        call_order.append("scan")
+
+    w3_mock = MagicMock()
+    with patch("main.get_all_prices", return_value=mock_prices), \
+         patch("main.detect_all_opportunities", return_value=[profitable_opp]), \
+         patch("main.simulate_arb", side_effect=record_sim), \
+         patch("main._log_scan_line", side_effect=record_scan), \
+         patch("main.should_execute", return_value=(False, "no_contract")):
+        main_module.run_cycle(w3_mock)
+
+    assert "simulate" in call_order, "simulate_arb must be called"
+    assert "scan" in call_order, "_log_scan_line must be called"
+    sim_idx  = call_order.index("simulate")
+    scan_idx = call_order.index("scan")
+    assert sim_idx < scan_idx, f"simulate must precede scan; order={call_order}"
+
+
+def test_executions_jsonl_only_after_sim_pass(tmp_path):
+    """log_opportunity must NOT be called when sim.is_executable=False."""
+    import main as main_module
+    from price_scanner import PriceQuote
+    from arb_detector import ArbOpportunity, SimResult
+
+    profitable_opp = ArbOpportunity(
+        pair="cbBTC/USDC", buy_venue="uniswap", sell_venue="aerodrome",
+        buy_price=68193.0, sell_price=68297.0,
+        gross_spread_pct=0.15, total_fee_pct=0.06, net_spread_pct=0.09,
+        flash_loan_usdc=34000.0, estimated_profit_usdc=30.0,
+        is_profitable=True, timestamp=time.time(),
+    )
+    failing_sim = SimResult(
+        buy_dex="uniswap", sell_dex="aerodrome",
+        token_amount=0.1, usdc_in=34000.0, usdc_out=34005.0,
+        gross_profit_usd=5.0, gas_cost_usd=2.0, net_profit_usd=3.0,
+        flash_provider="Morpho", is_executable=False, rejection_reason="below_min_profit",
+    )
+    mock_prices = {"cbBTC/USDC": [
+        PriceQuote("aerodrome", "cbBTC/USDC", 68297.0, 0.0001, 1, time.time()),
+        PriceQuote("uniswap",   "cbBTC/USDC", 68193.0, 0.0005, 1, time.time()),
+    ]}
+
+    log_calls = []
+    w3_mock = MagicMock()
+    with patch("main.get_all_prices", return_value=mock_prices), \
+         patch("main.detect_all_opportunities", return_value=[profitable_opp]), \
+         patch("main.simulate_arb", return_value=failing_sim), \
+         patch("main.log_opportunity",
+               side_effect=lambda opp, tag, sim=None: log_calls.append(tag)), \
+         patch("main.config.LOG_DIR", str(tmp_path)):
+        main_module.run_cycle(w3_mock)
+
+    assert len(log_calls) == 0, \
+        f"log_opportunity must not be called when sim fails; got: {log_calls}"
+
+
+def test_prime_requires_sim_pass(tmp_path):
+    """A PRIME opp is logged as 'SKIP' when sim passes but should_execute returns False."""
+    import main as main_module
+    from price_scanner import PriceQuote
+    from arb_detector import ArbOpportunity, SimResult
+
+    prime_opp = ArbOpportunity(
+        pair="cbBTC/USDC", buy_venue="uniswap", sell_venue="aerodrome",
+        buy_price=68000.0, sell_price=69000.0,
+        gross_spread_pct=1.47, total_fee_pct=0.06, net_spread_pct=1.41,
+        flash_loan_usdc=50000.0, estimated_profit_usdc=705.0,
+        is_profitable=True, timestamp=time.time(), tier="PRIME",
+    )
+    passing_sim = SimResult(
+        buy_dex="uniswap", sell_dex="aerodrome",
+        token_amount=0.5, usdc_in=50000.0, usdc_out=50700.0,
+        gross_profit_usd=700.0, gas_cost_usd=1.0, net_profit_usd=699.0,
+        flash_provider="Morpho", is_executable=True, rejection_reason="",
+    )
+    mock_prices = {"cbBTC/USDC": [
+        PriceQuote("aerodrome", "cbBTC/USDC", 69000.0, 0.0001, 1, time.time()),
+        PriceQuote("uniswap",   "cbBTC/USDC", 68000.0, 0.0005, 1, time.time()),
+    ]}
+
+    logged_tags = []
+    w3_mock = MagicMock()
+    with patch("main.get_all_prices", return_value=mock_prices), \
+         patch("main.detect_all_opportunities", return_value=[prime_opp]), \
+         patch("main.simulate_arb", return_value=passing_sim), \
+         patch("main.log_opportunity",
+               side_effect=lambda opp, tag, sim=None: logged_tags.append(tag)), \
+         patch("main.should_execute", return_value=(False, "EXECUTE_MODE=false")), \
+         patch("main.config.LOG_DIR", str(tmp_path)):
+        main_module.run_cycle(w3_mock)
+
+    assert "SKIP" in logged_tags, "sim-passed PRIME opp must be logged as SKIP"
+    assert "PROFITABLE" not in logged_tags, "PROFITABLE tag must not be used"
+
+
+def test_alchemy_key_is_new_key():
+    """ALCHEMY_EXEC_URL must not contain the old rotated Alchemy key."""
+    old_key = "pDNSLfjTbJYOD9RdmWGGY"
+    assert old_key not in (config.ALCHEMY_EXEC_URL or ""), \
+        f"Old Alchemy key still present in ALCHEMY_EXEC_URL: {config.ALCHEMY_EXEC_URL}"

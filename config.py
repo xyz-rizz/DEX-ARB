@@ -39,6 +39,11 @@ TIER_PRIME_PCT: float    = 0.15   # PRIME: execute at max size ($50k)
 TIER_GOOD_PCT: float     = 0.10   # GOOD: execute at normal size ($34k)
 TIER_MARGINAL_PCT: float = 0.065  # MARGINAL: execute at half size ($17k) = MIN_SPREAD_PCT
 
+# ── Execution readiness ───────────────────────────────────────────────────────
+# True only when ARB_EXECUTOR_ADDRESS is non-empty (contract deployed).
+# Used by should_execute() and startup banner. Evaluated at import time.
+EXECUTION_READY: bool = bool(os.getenv("ARB_EXECUTOR_ADDRESS", "").strip())
+
 # ── Quote sanity cap ───────────────────────────────────────────────────────────
 # Gross spread above this % is physically impossible between two liquid DEXes on
 # the same chain and is treated as bad data (stale pool, slippage mismatch,
@@ -62,6 +67,9 @@ UNISWAP_FACTORY: str        = Web3.to_checksum_address("0x33128a8fC17869897dcE68
 AERODROME_ROUTER: str        = Web3.to_checksum_address("0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43")
 AERODROME_FACTORY: str       = Web3.to_checksum_address("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
 AERODROME_VAMM_FACTORY: str  = Web3.to_checksum_address("0x420DD381b31aEf6683db6B902084cB0FFECe40Da")
+# Aerodrome Slipstream CL Quoter — uses tickSpacing instead of fee in quoteExactInputSingle.
+# Address verified: Aerodrome CLQuoter on Base mainnet.
+AERODROME_SLIPSTREAM_QUOTER: str = Web3.to_checksum_address("0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0")
 
 MORPHO_ADDRESS: str  = Web3.to_checksum_address("0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb")
 BALANCER_VAULT: str  = Web3.to_checksum_address("0xBA12222222228d8Ba445958a75a0704d566BF2C8")
@@ -233,10 +241,10 @@ PAIR_CONFIG = [
 DEX_CONFIG = [
     {
         "name": "Aerodrome Slipstream",
-        "type": "slipstream",          # Uniswap V3 CL fork, uses slot0 for price
+        "type": "slipstream",          # Uniswap V3 CL fork; uses CLQuoter for execution quotes
         "factory": "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A",
         "router":  "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
-        "quoter":  None,               # no separate quoter; uses slot0
+        "quoter":  "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0",  # Aerodrome CLQuoter on Base
         "tick_spacings": [1, 50, 100, 200],
         "fee_pct": 0.0001,             # typical for tick_spacing=1
     },

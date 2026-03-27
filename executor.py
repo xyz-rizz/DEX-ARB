@@ -1,13 +1,15 @@
 """
 Executor for DEX Arbitrage Bot.
-Phase 1: scan-only — execution stubs only. Phase 6 will add real on-chain execution.
-Simulation gate added: simulate_arb() must pass before any execution.
+Phase 1: scan-and-simulate — execute_arb() returns an honest stub while
+ARB_EXECUTOR_ADDRESS is not set (contract not deployed).
+Simulation gate: simulate_arb() must pass before any execution attempt.
 Never imports from the morpho_scanner liquidation bot.
 """
 
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,12 +19,29 @@ import config
 logger = logging.getLogger(__name__)
 
 
+# ── Execution result ──────────────────────────────────────────────────────────
+
+@dataclass
+class ExecutionResult:
+    """Result returned by execute_arb()."""
+    tag: str                       # STUB / DRY / SENT / ERROR
+    tx_hash: str = ""
+    estimated_profit_usd: float = 0.0
+    actual_profit_usd: float = 0.0
+    reason: str = ""               # human-readable status note
+    error: str = ""
+
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
+
 def _ensure_log_dir() -> Path:
     """Create log directory if it doesn't exist."""
     log_dir = Path(config.LOG_DIR)
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
 
+
+# ── Execution gate ─────────────────────────────────────────────────────────────
 
 def should_execute(opp: ArbOpportunity, sim: SimResult = None) -> tuple:
     """
@@ -32,7 +51,7 @@ def should_execute(opp: ArbOpportunity, sim: SimResult = None) -> tuple:
     1. opp.is_profitable
     2. opp.estimated_profit_usdc >= MIN_NET_PROFIT_USD
     3. EXECUTE_MODE == True
-    4. ARB_EXECUTOR_ADDRESS set (non-empty)
+    4. ARB_EXECUTOR_ADDRESS set (non-empty) — contract must be deployed
     5. sim.is_executable (if SimResult provided)
 
     Returns:
@@ -52,7 +71,7 @@ def should_execute(opp: ArbOpportunity, sim: SimResult = None) -> tuple:
         return False, "EXECUTE_MODE=false"
 
     if not config.ARB_EXECUTOR_ADDRESS:
-        return False, "ARB_EXECUTOR_ADDRESS not set — run deploy/deploy.py"
+        return False, "execution_not_ready_no_contract"
 
     if sim is not None and not sim.is_executable:
         return False, f"simulation_rejected:{sim.rejection_reason}"
@@ -60,16 +79,20 @@ def should_execute(opp: ArbOpportunity, sim: SimResult = None) -> tuple:
     return True, ""
 
 
+# ── JSONL logger ───────────────────────────────────────────────────────────────
+
 def log_opportunity(opp: ArbOpportunity, tag: str, sim: SimResult = None) -> None:
     """
     Append one opportunity record to logs/executions.jsonl.
 
     tag values:
-        PROFITABLE      — above threshold, not yet executed
+        EXECUTABLE  — sim passed; execution pending or attempted
+        DRY         — would execute, but DRY_RUN=true or contract not deployed
+        SKIP        — sim passed but should_execute() returned False
+        SENT        — tx submitted on-chain
+        ERROR       — exception during execution
+        PROFITABLE  — backward-compat: sim not yet run (legacy path)
         BELOW_THRESHOLD — spread too small
-        DRY             — would execute, but DRY_RUN=true
-        SKIP            — should_execute() returned False
-        ERROR           — exception during execution
     """
     log_dir = _ensure_log_dir()
     path = log_dir / "executions.jsonl"
@@ -107,25 +130,58 @@ def log_opportunity(opp: ArbOpportunity, tag: str, sim: SimResult = None) -> Non
                  tag, opp.pair, opp.estimated_profit_usdc)
 
 
-def execute_arb(opp: ArbOpportunity, sim: SimResult = None) -> dict:
-    """
-    Phase 1 stub — execution not yet implemented.
-    Logs DRY and returns a placeholder result dict.
+# ── Execute arb ───────────────────────────────────────────────────────────────
 
-    Phase 6 will replace this with real on-chain execution via ArbExecutor.sol.
+def execute_arb(w3_exec, opp: ArbOpportunity, sim: SimResult,
+                dry_run: bool = True) -> ExecutionResult:
     """
+    Execute (or dry-run) the arbitrage trade.
+
+    While ARB_EXECUTOR_ADDRESS is not set (EXECUTION_READY=False), returns an
+    honest stub explaining what is needed. No transaction is ever built or sent.
+
+    When EXECUTION_READY=True (post contract deployment), implement real path:
+      1. Build ArbParams struct from opp/sim
+      2. build_transaction() via w3_exec (Alchemy)
+      3. If dry_run=True: log params, return DRY
+      4. If dry_run=False: sign + send + wait receipt, return SENT
+
+    Parameters
+    ----------
+    w3_exec : Web3
+        Execution provider (Alchemy). Used only when EXECUTION_READY=True.
+    opp : ArbOpportunity
+        The arbitrage candidate (sim-validated).
+    sim : SimResult
+        Simulation result that passed the is_executable gate.
+    dry_run : bool
+        True = log only, no tx sent. False = live execution.
+    """
+    if not config.EXECUTION_READY:
+        logger.info(
+            "EXEC_STUB | scan-only mode | %s | sim_profit=$%.2f | "
+            "would need: deploy ArbExecutor.sol then set ARB_EXECUTOR_ADDRESS in .env",
+            opp.pair,
+            sim.net_profit_usd if sim else 0.0,
+        )
+        return ExecutionResult(
+            tag="STUB",
+            reason="no_contract_address",
+            estimated_profit_usd=sim.net_profit_usd if sim else 0.0,
+        )
+
+    # ── Real execution path (post-deployment) ────────────────────────────────
+    # Reached only when ARB_EXECUTOR_ADDRESS is non-empty.
+    # TODO: implement Phase 6 on-chain execution here.
     logger.info(
-        "DRY_RUN execute_arb | %s buy=%s sell=%s profit=$%.2f sim_net=$%.2f",
-        opp.pair,
-        opp.buy_venue,
-        opp.sell_venue,
+        "EXEC_DRY_RUN | %s buy=%s sell=%s profit=$%.2f sim_net=$%.2f",
+        opp.pair, opp.buy_venue, opp.sell_venue,
         opp.estimated_profit_usdc,
         sim.net_profit_usd if sim else 0,
     )
     log_opportunity(opp, "DRY", sim)
-    return {
-        "success":            False,
-        "tx_hash":            "",
-        "actual_profit_usdc": 0.0,
-        "error":              "execution not yet implemented — deploy ArbExecutor.sol first",
-    }
+    return ExecutionResult(
+        tag="DRY",
+        reason="dry_run_mode",
+        estimated_profit_usd=sim.net_profit_usd if sim else 0.0,
+    )

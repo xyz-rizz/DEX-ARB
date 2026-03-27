@@ -66,7 +66,7 @@ def test_should_execute_false_when_no_contract_address():
          patch("executor.config.ARB_EXECUTOR_ADDRESS", ""):
         result, reason = should_execute(opp)
     assert result is False
-    assert "ARB_EXECUTOR_ADDRESS" in reason
+    assert "execution_not_ready_no_contract" in reason
 
 
 def test_should_execute_false_when_below_min_profit():
@@ -262,6 +262,31 @@ def test_main_loop_does_not_crash_on_price_error():
 
     with patch("main.get_all_prices", side_effect=Exception("RPC error")):
         # Must not raise
-        run_cycle(w3, stats)
+        run_cycle(w3, None, stats)
 
     assert stats.cycles == 0  # Nothing recorded since prices failed
+
+
+# ── New: EXECUTION_READY + ExecutionResult tests ──────────────────────────────
+
+def test_execution_ready_false_when_no_address():
+    """EXECUTION_READY matches whether ARB_EXECUTOR_ADDRESS is set."""
+    import config as cfg
+    expected = bool(cfg.ARB_EXECUTOR_ADDRESS.strip())
+    assert cfg.EXECUTION_READY == expected
+
+
+def test_execute_arb_stub_when_no_contract():
+    """execute_arb returns ExecutionResult(tag='STUB') when EXECUTION_READY=False."""
+    from executor import execute_arb, ExecutionResult
+    opp = _make_opp(profitable=True, profit=50.0)
+    sim = _make_sim(executable=True)
+    w3_mock = MagicMock()
+
+    with patch("executor.config.EXECUTION_READY", False):
+        result = execute_arb(w3_mock, opp, sim)
+
+    assert isinstance(result, ExecutionResult)
+    assert result.tag == "STUB"
+    assert result.reason == "no_contract_address"
+    assert result.estimated_profit_usd == sim.net_profit_usd
