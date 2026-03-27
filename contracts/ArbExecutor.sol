@@ -93,7 +93,7 @@ contract ArbExecutor {
         address tokenBorrow;       // token to flash-loan (typically USDC)
         address tokenIntermediate; // intermediate token (cbBTC, weETH, etc.)
         uint24  uniFee;            // Uniswap V3 fee tier (e.g. 500)
-        int24   aeroTickSpacing;   // Aerodrome tick spacing (e.g. 1)
+        uint24  aeroTickSpacing;   // Aerodrome tick spacing (e.g. 1)
         uint256 flashLoanAmount;   // raw units of tokenBorrow to borrow
         uint256 minIntermediate;   // min intermediate from first swap (slippage guard)
         uint256 minRepayToken;     // min borrow-token from second swap (slippage guard)

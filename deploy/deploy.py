@@ -30,7 +30,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv, set_key
 from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware
 
 _log = logging.getLogger(__name__)
 
@@ -131,7 +130,6 @@ def deploy_contract(abi: list, bytecode: str) -> str:
         sys.exit(1)
 
     w3 = Web3(Web3.HTTPProvider(rpc_url))
-    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
     if not w3.is_connected():
         print(f"[deploy] ERROR: Cannot connect to RPC: {rpc_url}")
@@ -172,7 +170,8 @@ def deploy_contract(abi: list, bytecode: str) -> str:
     print(f"[deploy] Signing and broadcasting…")
 
     signed = account.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+    raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+    tx_hash = w3.eth.send_raw_transaction(raw)
     print(f"[deploy] Tx broadcast: {tx_hash.hex()}")
 
     print("[deploy] Waiting for confirmation…")

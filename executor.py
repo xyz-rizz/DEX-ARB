@@ -9,12 +9,126 @@ Never imports from the morpho_scanner liquidation bot.
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from arb_detector import ArbOpportunity, SimResult, simulate_arb
+from web3 import Web3
+from arb_detector import ArbOpportunity, SimResult, simulate_arb, _estimate_eth_price
 import config
+
+# ── Contract ABI / tx-building helpers ───────────────────────────────────────
+
+_ROOT     = Path(__file__).resolve().parent
+_ABI_PATH = _ROOT / "contracts" / "ArbExecutor.abi.json"
+
+# Per-pair execution params for tx construction.
+# uniFee: Uniswap V3 fee tier (integer, e.g. 500)
+# aero_tick: Aerodrome Slipstream tick spacing (integer, e.g. 1)
+_PAIR_EXEC_PARAMS: dict = {
+    "cbBTC/USDC":   {"uni_fee": 500,   "aero_tick": 1},
+    "weETH/WETH":   {"uni_fee": 100,   "aero_tick": 1},
+    "cbETH/WETH":   {"uni_fee": 500,   "aero_tick": 1},
+    "wstETH/WETH":  {"uni_fee": 100,   "aero_tick": 1},
+    "WETH/USDC":    {"uni_fee": 500,   "aero_tick": 200},
+    "USDC/USDbC":   {"uni_fee": 100,   "aero_tick": 1},
+    "DAI/USDC":     {"uni_fee": 100,   "aero_tick": 50},
+    "AERO/WETH":    {"uni_fee": 3000,  "aero_tick": 200},
+    "DEGEN/WETH":   {"uni_fee": 3000,  "aero_tick": 200},
+    "BRETT/WETH":   {"uni_fee": 10000, "aero_tick": 200},
+    "VIRTUAL/WETH": {"uni_fee": 3000,  "aero_tick": 200},
+    "TOSHI/WETH":   {"uni_fee": 10000, "aero_tick": 200},
+    "cbXRP/USDC":   {"uni_fee": 500,   "aero_tick": 200},
+    "MOG/WETH":     {"uni_fee": 10000, "aero_tick": 200},
+    "HIGHER/WETH":  {"uni_fee": 3000,  "aero_tick": 200},
+}
+_DEFAULT_EXEC_PARAMS = {"uni_fee": 500, "aero_tick": 50}
+
+
+def _load_abi() -> list:
+    """Load compiled ArbExecutor ABI. Created by deploy/deploy.py."""
+    if not _ABI_PATH.exists():
+        raise FileNotFoundError(
+            f"ABI not found at {_ABI_PATH} — run: python deploy/deploy.py"
+        )
+    return json.loads(_ABI_PATH.read_text())
+
+
+def _build_arb_params(
+    opp: ArbOpportunity,
+    sim: SimResult,
+    eth_price: float,
+) -> tuple:
+    """
+    Construct an ArbParams tuple for executeArb().
+    Field order must match ArbExecutor.sol struct definition exactly.
+
+    Struct fields (in order):
+      tokenBorrow, tokenIntermediate, uniFee, aeroTickSpacing,
+      flashLoanAmount, minIntermediate, minRepayToken,
+      minProfit, deadline, buyOnUniswap
+    """
+    pair_cfg = next(
+        (p for p in config.PAIR_CONFIG if p["name"] == opp.pair), None
+    )
+    if pair_cfg is None:
+        raise ValueError(f"pair_config not found for {opp.pair}")
+
+    token_borrow = pair_cfg["token_out"]
+    token_inter  = pair_cfg["token_in"]
+    dec_out = pair_cfg["dec_out"]
+    dec_in  = pair_cfg["dec_in"]
+
+    is_weth_borrow = token_borrow.lower() == config.WETH_ADDRESS.lower()
+
+    # Flash loan amount in raw borrow-token units
+    if is_weth_borrow:
+        borrow_human = opp.flash_loan_usdc / max(eth_price, 1.0)
+    else:
+        borrow_human = opp.flash_loan_usdc
+    flash_loan_raw = int(borrow_human * (10 ** dec_out))
+
+    # Min intermediate received from buy leg (2% slippage buffer)
+    min_inter_raw = int(sim.token_amount * 0.98 * (10 ** dec_in))
+
+    # Min repay token from sell leg (2% slippage buffer)
+    # sim.usdc_out is in USD terms; convert back to borrow-token units
+    if is_weth_borrow:
+        repay_human = sim.usdc_out / max(eth_price, 1.0)
+    else:
+        repay_human = sim.usdc_out
+    min_repay_raw = int(repay_human * 0.98 * (10 ** dec_out))
+
+    # Min profit in raw borrow-token units
+    if is_weth_borrow:
+        min_profit_raw = int(
+            (config.MIN_NET_PROFIT_USD / max(eth_price, 1.0)) * (10 ** dec_out)
+        )
+    else:
+        min_profit_raw = int(config.MIN_NET_PROFIT_USD * (10 ** dec_out))
+
+    # Buy-on-Uniswap flag
+    buy_on_uni = any(
+        v in opp.buy_venue
+        for v in ("Uniswap", "PancakeSwap", "BaseSwap")
+    )
+
+    # Fee / tick-spacing lookup
+    ep = _PAIR_EXEC_PARAMS.get(opp.pair, _DEFAULT_EXEC_PARAMS)
+
+    return (
+        Web3.to_checksum_address(token_borrow),   # tokenBorrow
+        Web3.to_checksum_address(token_inter),     # tokenIntermediate
+        ep["uni_fee"],                             # uniFee (uint24)
+        ep["aero_tick"],                           # aeroTickSpacing (int24)
+        flash_loan_raw,                            # flashLoanAmount
+        min_inter_raw,                             # minIntermediate
+        min_repay_raw,                             # minRepayToken
+        min_profit_raw,                            # minProfit
+        int(time.time()) + 60,                     # deadline
+        buy_on_uni,                                # buyOnUniswap
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -172,16 +286,93 @@ def execute_arb(w3_exec, opp: ArbOpportunity, sim: SimResult,
 
     # ── Real execution path (post-deployment) ────────────────────────────────
     # Reached only when ARB_EXECUTOR_ADDRESS is non-empty.
-    # TODO: implement Phase 6 on-chain execution here.
-    logger.info(
-        "EXEC_DRY_RUN | %s buy=%s sell=%s profit=$%.2f sim_net=$%.2f",
-        opp.pair, opp.buy_venue, opp.sell_venue,
-        opp.estimated_profit_usdc,
-        sim.net_profit_usd if sim else 0,
-    )
-    log_opportunity(opp, "DRY", sim)
-    return ExecutionResult(
-        tag="DRY",
-        reason="dry_run_mode",
-        estimated_profit_usd=sim.net_profit_usd if sim else 0.0,
-    )
+    try:
+        from eth_account import Account
+
+        abi    = _load_abi()
+        wallet = Account.from_key(config.PRIVATE_KEY).address
+
+        if w3_exec is None:
+            raise RuntimeError("w3_exec is None — ALCHEMY_EXEC_URL not set")
+
+        eth_price = _estimate_eth_price(w3_exec)
+
+        contract = w3_exec.eth.contract(
+            address=Web3.to_checksum_address(config.ARB_EXECUTOR_ADDRESS),
+            abi=abi,
+        )
+
+        arb_params = _build_arb_params(opp, sim, eth_price)
+        provider_int = 1 if (sim and sim.flash_provider == "Balancer") else 0
+
+        gas_price = w3_exec.eth.gas_price
+        nonce     = w3_exec.eth.get_transaction_count(wallet)
+
+        tx = contract.functions.executeArb(
+            arb_params, provider_int
+        ).build_transaction({
+            "from":     wallet,
+            "gas":      600_000,
+            "gasPrice": gas_price * 2,
+            "nonce":    nonce,
+            "chainId":  config.BASE_CHAIN_ID,
+        })
+
+        logger.info(
+            "DRY_RUN | %s | to=%s | gas=%d | data=%s... | est_profit=$%.2f",
+            opp.pair,
+            tx["to"],
+            tx["gas"],
+            tx["data"][:66],
+            sim.net_profit_usd if sim else 0.0,
+        )
+
+        if dry_run or config.DRY_RUN:
+            log_opportunity(opp, "DRY", sim)
+            return ExecutionResult(
+                tag="DRY",
+                reason=f"to={tx['to']} gas={tx['gas']}",
+                estimated_profit_usd=sim.net_profit_usd if sim else 0.0,
+            )
+
+        # ── Live execution (only when both dry_run=False AND DRY_RUN=false) ──
+        signed  = w3_exec.eth.account.sign_transaction(tx, config.PRIVATE_KEY)
+        tx_hash = w3_exec.eth.send_raw_transaction(signed.raw_transaction)
+        logger.info("SENT | %s | tx_hash=%s", opp.pair, tx_hash.hex())
+
+        receipt = w3_exec.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+        if receipt.status != 1:
+            raise RuntimeError(f"tx reverted: {tx_hash.hex()}")
+
+        # Read profit from ArbExecuted event
+        actual_profit = 0.0
+        try:
+            events = contract.events.ArbExecuted().process_receipt(receipt)
+            if events:
+                raw_profit = events[0]["args"]["profit"]
+                dec_out = next(
+                    (p["dec_out"] for p in config.PAIR_CONFIG if p["name"] == opp.pair),
+                    6,
+                )
+                actual_profit = raw_profit / (10 ** dec_out)
+                if pair_cfg := next(
+                    (p for p in config.PAIR_CONFIG if p["name"] == opp.pair), None
+                ):
+                    is_weth_borrow = pair_cfg["token_out"].lower() == config.WETH_ADDRESS.lower()
+                    if is_weth_borrow:
+                        actual_profit *= eth_price
+        except Exception:
+            pass
+
+        log_opportunity(opp, "SENT", sim)
+        return ExecutionResult(
+            tag="SENT",
+            tx_hash=tx_hash.hex(),
+            actual_profit_usd=actual_profit,
+            estimated_profit_usd=sim.net_profit_usd if sim else 0.0,
+        )
+
+    except Exception as exc:
+        logger.error("execute_arb failed for %s: %s", opp.pair, exc, exc_info=True)
+        log_opportunity(opp, "ERROR", sim)
+        return ExecutionResult(tag="ERROR", error=str(exc))
