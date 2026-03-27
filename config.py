@@ -37,7 +37,7 @@ MAX_FLASH_LOAN_USDC: float   = float(os.getenv("MAX_FLASH_LOAN_USDC", "50000"))
 # ── Tier thresholds (net spread in %) ─────────────────────────────────────────
 TIER_PRIME_PCT: float    = 0.15   # PRIME: execute at max size ($50k)
 TIER_GOOD_PCT: float     = 0.10   # GOOD: execute at normal size ($34k)
-TIER_MARGINAL_PCT: float = 0.065  # MARGINAL: execute at half size ($17k) = MIN_SPREAD_PCT
+TIER_MARGINAL_PCT: float = float(os.getenv("MIN_SPREAD_PCT", "0.065"))  # MARGINAL: execute at half size ($17k)
 
 # ── Depth discovery ───────────────────────────────────────────────────────────
 # Maximum slippage allowed on each leg during depth probing.

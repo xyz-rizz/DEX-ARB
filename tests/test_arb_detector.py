@@ -204,12 +204,19 @@ def test_tier_good_at_010_pct():
 
 
 def test_tier_marginal_at_007_pct():
-    """MARGINAL tier at >= 0.065% (but < 0.10%) → flash = min($17k, max)."""
-    assert assign_tier(0.07) == "MARGINAL"
-    assert assign_tier(0.065) == "MARGINAL"
-
-    flash, _ = calculate_trade_size(68000.0, 0.07, 50_000.0)
-    assert flash == 17_000.0
+    """MARGINAL tier at >= 0.065% (but < 0.10%) → flash = min($17k, max).
+    Pin TIER_MARGINAL_PCT to default 0.065 so test is .env-independent."""
+    with patch("arb_detector.config") as mock_cfg:
+        mock_cfg.TIER_PRIME_PCT      = 0.15
+        mock_cfg.TIER_GOOD_PCT       = 0.10
+        mock_cfg.TIER_MARGINAL_PCT   = 0.065
+        mock_cfg.FLASH_PRIME_USDC    = 50_000.0
+        mock_cfg.FLASH_GOOD_USDC     = 34_000.0
+        mock_cfg.FLASH_MARGINAL_USDC = 17_000.0
+        assert assign_tier(0.07) == "MARGINAL"
+        assert assign_tier(0.065) == "MARGINAL"
+        flash, _ = calculate_trade_size(68000.0, 0.07, 50_000.0)
+        assert flash == 17_000.0
 
 
 def test_tier_below_at_004_pct():
@@ -611,6 +618,37 @@ def test_depth_rejected_opp_has_zero_flash_and_not_profitable():
     assert opp.tier == "DEPTH_REJECTED"
     assert opp.flash_loan_usdc == 0.0
     assert opp.is_profitable is False
+
+
+def test_tier_marginal_pct_reads_from_env():
+    """TIER_MARGINAL_PCT must equal MIN_SPREAD_PCT — single source of truth."""
+    import importlib
+    import sys
+    import os
+
+    # Reload config with a custom MIN_SPREAD_PCT env value
+    old_val = os.environ.get("MIN_SPREAD_PCT")
+    os.environ["MIN_SPREAD_PCT"] = "0.001"
+    try:
+        # Force fresh reload so os.getenv picks up the new value
+        if "config" in sys.modules:
+            del sys.modules["config"]
+        import config as cfg_fresh
+        assert cfg_fresh.MIN_SPREAD_PCT == 0.001, \
+            f"MIN_SPREAD_PCT should be 0.001, got {cfg_fresh.MIN_SPREAD_PCT}"
+        assert cfg_fresh.TIER_MARGINAL_PCT == 0.001, \
+            f"TIER_MARGINAL_PCT should be 0.001, got {cfg_fresh.TIER_MARGINAL_PCT}"
+        assert cfg_fresh.MIN_SPREAD_PCT == cfg_fresh.TIER_MARGINAL_PCT, \
+            "MIN_SPREAD_PCT and TIER_MARGINAL_PCT must be identical"
+    finally:
+        # Restore original env and config module
+        if old_val is None:
+            os.environ.pop("MIN_SPREAD_PCT", None)
+        else:
+            os.environ["MIN_SPREAD_PCT"] = old_val
+        if "config" in sys.modules:
+            del sys.modules["config"]
+        importlib.import_module("config")
 
 
 def test_zero_flash_loan_never_creates_profitable_opp():
