@@ -92,7 +92,7 @@ def test_dry_written_exactly_once(tmp_path):
          patch("main.execute_arb", return_value=dry_result), \
          patch("main.should_execute", return_value=(True, "")), \
          patch("main.log_opportunity",
-               side_effect=lambda o, tag, s=None: tags_logged.append(tag)), \
+               side_effect=lambda o, tag, s=None, **kw: tags_logged.append(tag)), \
          patch("main.config.LOG_DIR", str(tmp_path)):
         run_cycle(MagicMock(), MagicMock(), CycleStats())
 

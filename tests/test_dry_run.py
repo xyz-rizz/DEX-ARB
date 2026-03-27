@@ -212,7 +212,7 @@ def test_single_jsonl_record_per_execution_event(tmp_path):
     sim = _sim()
     log_calls = []
 
-    def capture_log(o, tag, s=None):
+    def capture_log(o, tag, s=None, **kw):
         log_calls.append(tag)
 
     with patch("main.get_all_prices", return_value={"WETH/USDC": []}), \

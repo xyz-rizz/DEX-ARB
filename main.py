@@ -316,7 +316,7 @@ def run_cycle(w3_read: Web3, w3_exec: Web3 = None, stats: CycleStats = None) -> 
                 execute, reason = should_execute(top_opp, top_sim)
                 if execute:
                     result = execute_arb(w3_exec, top_opp, top_sim, dry_run=config.DRY_RUN)
-                    log_opportunity(top_opp, result.tag, top_sim)
+                    log_opportunity(top_opp, result.tag, top_sim, error=result.error, tx_hash=result.tx_hash)
                 elif top_sim.is_executable:
                     log_opportunity(top_opp, "SKIP", top_sim)
                     logger.info("SKIP | %s | %s", top_opp.pair, reason)
