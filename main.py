@@ -60,7 +60,8 @@ def _print_banner() -> None:
     mode = "EXECUTE" if config.EXECUTE_MODE else "SCAN_ONLY"
     pair_names = [p["name"] for p in config.PAIR_CONFIG]
     if config.EXECUTION_READY:
-        exec_line = f"  EXECUTION: READY | contract={config.ARB_EXECUTOR_ADDRESS}"
+        exec_mode = "DRY_RUN" if config.DRY_RUN else "LIVE"
+        exec_line = f"  EXECUTION: READY | contract={config.ARB_EXECUTOR_ADDRESS} | mode={exec_mode}"
     else:
         exec_line = "  EXECUTION: DISABLED (no contract deployed — set ARB_EXECUTOR_ADDRESS)"
     print(
@@ -104,7 +105,12 @@ def _log_scan_line(opp: ArbOpportunity, sim: SimResult = None) -> None:
         tier_str = _TIER_EMOJI.get(opp.tier, opp.tier)
 
     flash_k = f"${opp.flash_loan_usdc/1000:.0f}k" if opp.flash_loan_usdc >= 1000 else f"${opp.flash_loan_usdc:.0f}"
-    sim_suffix = f" | sim_net=${sim.net_profit_usd:.2f}" if sim is not None else ""
+
+    # Show post-sim profit when simulation has run; pre-sim estimate otherwise.
+    if sim is not None:
+        profit_str = f"sim_profit=${sim.net_profit_usd:.2f}"
+    else:
+        profit_str = f"est_profit=${opp.estimated_profit_usdc:.2f}"
 
     # Cost breakdown suffix — show component costs when available
     cost = getattr(opp, "cost", None)
@@ -125,7 +131,7 @@ def _log_scan_line(opp: ArbOpportunity, sim: SimResult = None) -> None:
         f"{opp.sell_venue[:6]}={opp.sell_price:.8g} | "
         f"spread={opp.gross_spread_pct:.4f}% net={opp.net_spread_pct:.4f}% | "
         f"flash={flash_k} | "
-        f"profit=${opp.estimated_profit_usdc:.2f}{sim_suffix}{cost_suffix} | {tier_str}"
+        f"{profit_str}{cost_suffix} | {tier_str}"
     )
 
 
@@ -234,76 +240,103 @@ class CycleStats:
 
 def run_cycle(w3_read: Web3, w3_exec: Web3 = None, stats: CycleStats = None) -> None:
     """Execute one scan cycle — fetch prices, detect, simulate, log, optionally execute."""
-    try:
-        prices = get_all_prices(w3_read)
-    except Exception as exc:
-        logger.error("Price fetch failed: %s", exc)
-        return
-
-    if not prices:
-        logger.debug("No prices returned this cycle")
-        return
-
-    # Detect all opportunities for all pairs
-    try:
-        all_opps = detect_all_opportunities(
-            prices=prices,
-            min_spread_pct=config.MIN_SPREAD_PCT,
-            max_flash_usdc=config.MAX_FLASH_LOAN_USDC,
-            w3=w3_read,
-        )
-    except Exception as exc:
-        logger.error("detect_all_opportunities failed: %s", exc)
-        return
-
-    # Simulate top profitable candidates BEFORE any logging
-    profitable = [o for o in all_opps if o.is_profitable]
-    top3 = profitable[:3]
-    sim_by_id: dict = {}  # id(opp) -> SimResult
-
-    for opp in top3:
-        try:
-            sim = simulate_arb(w3_read, opp)
-            sim_by_id[id(opp)] = sim
-            opp.flash_provider = sim.flash_provider
-        except Exception as exc:
-            logger.error("simulate_arb failed for %s: %s", opp.pair, exc)
-
-    # Log ARB_SCAN for every opportunity (with sim result if available)
-    for opp in all_opps:
-        try:
-            _log_scan_line(opp, sim_by_id.get(id(opp)))
-        except Exception as exc:
-            logger.error("scan line for %s failed: %s", opp.pair, exc)
-
-    # Select the best candidate (by sim net profit)
-    top_sim: SimResult = None
+    t_start    = time.time()
+    t_prices   = t_start
+    t_detect   = t_start
+    t_sim      = t_start
+    t_build    = t_start
+    prices     = []
+    all_opps   = []
+    profitable: list = []
     top_opp: ArbOpportunity = None
+    top_sim: SimResult = None
 
-    for opp in top3:
-        sim = sim_by_id.get(id(opp))
-        if sim is None:
-            continue
-        if top_sim is None or sim.net_profit_usd > top_sim.net_profit_usd:
-            top_sim = sim
-            top_opp = opp
-
-    # Log ARB_BEST and write JSONL only if sim passed
-    if top_opp and top_sim:
+    try:
+        # ── Price fetch ───────────────────────────────────────────────────────
         try:
-            _log_best(top_opp, top_sim)
-            execute, reason = should_execute(top_opp, top_sim)
-            if execute:
-                result = execute_arb(w3_exec, top_opp, top_sim)
-                log_opportunity(top_opp, result.tag, top_sim)
-            elif top_sim.is_executable:
-                log_opportunity(top_opp, "SKIP", top_sim)
-                logger.debug("SKIP: %s", reason)
+            prices = get_all_prices(w3_read)
         except Exception as exc:
-            logger.error("Execution logic failed: %s", exc)
+            logger.error("Price fetch failed: %s", exc)
+            return
+        t_prices = time.time()
 
-    if stats is not None:
-        stats.record_cycle(all_opps, top_sim)
+        if not prices:
+            logger.debug("No prices returned this cycle")
+            return
+
+        # ── Opportunity detection ─────────────────────────────────────────────
+        try:
+            all_opps = detect_all_opportunities(
+                prices=prices,
+                min_spread_pct=config.MIN_SPREAD_PCT,
+                max_flash_usdc=config.MAX_FLASH_LOAN_USDC,
+                w3=w3_read,
+            )
+        except Exception as exc:
+            logger.error("detect_all_opportunities failed: %s", exc)
+            return
+        t_detect = time.time()
+
+        # ── Simulate top profitable candidates BEFORE any logging ─────────────
+        profitable = [o for o in all_opps if o.is_profitable]
+        top3 = profitable[:3]
+        sim_by_id: dict = {}  # id(opp) -> SimResult
+
+        for opp in top3:
+            try:
+                sim = simulate_arb(w3_read, opp)
+                sim_by_id[id(opp)] = sim
+                opp.flash_provider = sim.flash_provider
+            except Exception as exc:
+                logger.error("simulate_arb failed for %s: %s", opp.pair, exc)
+        t_sim = time.time()
+
+        # ── Log ARB_SCAN for every opportunity (with sim result if available) ──
+        for opp in all_opps:
+            try:
+                _log_scan_line(opp, sim_by_id.get(id(opp)))
+            except Exception as exc:
+                logger.error("scan line for %s failed: %s", opp.pair, exc)
+
+        # ── Select the best candidate (by sim net profit) ─────────────────────
+        for opp in top3:
+            sim = sim_by_id.get(id(opp))
+            if sim is None:
+                continue
+            if top_sim is None or sim.net_profit_usd > top_sim.net_profit_usd:
+                top_sim = sim
+                top_opp = opp
+
+        # ── Log ARB_BEST and write JSONL only if sim passed ───────────────────
+        if top_opp and top_sim:
+            try:
+                _log_best(top_opp, top_sim)
+                execute, reason = should_execute(top_opp, top_sim)
+                if execute:
+                    result = execute_arb(w3_exec, top_opp, top_sim)
+                    log_opportunity(top_opp, result.tag, top_sim)
+                elif top_sim.is_executable:
+                    log_opportunity(top_opp, "SKIP", top_sim)
+                    logger.debug("SKIP: %s", reason)
+            except Exception as exc:
+                logger.error("Execution logic failed: %s", exc)
+        t_build = time.time()
+
+        if stats is not None:
+            stats.record_cycle(all_opps, top_sim)
+
+    finally:
+        t_total = time.time()
+        print(
+            f"LATENCY | scan={t_prices - t_start:.2f}s | "
+            f"detect={t_detect - t_prices:.2f}s | "
+            f"sim={t_sim - t_detect:.2f}s | "
+            f"build={t_build - t_sim:.2f}s | "
+            f"total={t_total - t_start:.2f}s | "
+            f"pairs={len(prices)} | "
+            f"candidates={len(profitable)} | "
+            f"top_pair={top_opp.pair if top_opp else 'none'}"
+        )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
