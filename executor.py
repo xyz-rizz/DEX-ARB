@@ -1,9 +1,9 @@
 """
 Executor for DEX Arbitrage Bot.
-Phase 1: scan-and-simulate — execute_arb() returns an honest stub while
-ARB_EXECUTOR_ADDRESS is not set (contract not deployed).
+Contract deployed. execute_arb() builds and optionally sends live transactions.
 Simulation gate: simulate_arb() must pass before any execution attempt.
 Never imports from the morpho_scanner liquidation bot.
+Server: /home/ubuntu/dexarb on ec2-44-202-120-86.compute-1.amazonaws.com
 """
 
 import json
