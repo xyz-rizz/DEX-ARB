@@ -79,9 +79,10 @@ FLASH_MARGINAL_USDC: float = 17_000.0
 LOG_DIR: str = os.getenv("LOG_DIR", "logs")
 
 # ── Protocol addresses (Base mainnet) ─────────────────────────────────────────
-UNISWAP_SWAP_ROUTER_02: str = Web3.to_checksum_address("0x2626664c2603336E57B271c5C0b26F421741e481")
-UNISWAP_QUOTER_V2: str      = Web3.to_checksum_address("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a")
-UNISWAP_FACTORY: str        = Web3.to_checksum_address("0x33128a8fC17869897dcE68Ed026d694621f6FDfD")
+UNISWAP_SWAP_ROUTER_02: str  = Web3.to_checksum_address("0x2626664c2603336E57B271c5C0b26F421741e481")
+UNISWAP_QUOTER_V2: str       = Web3.to_checksum_address("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a")
+UNISWAP_FACTORY: str         = Web3.to_checksum_address("0x33128a8fC17869897dcE68Ed026d694621f6FDfD")
+PANCAKESWAP_V3_ROUTER: str   = Web3.to_checksum_address("0x1b81D678ffb9C0263b24A97847620C99d213eB14")
 
 AERODROME_ROUTER: str        = Web3.to_checksum_address("0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43")  # vAMM / main router (V2-style swapExactTokensForTokens)
 AERODROME_SLIPSTREAM_ROUTER: str = Web3.to_checksum_address("0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5")  # CL SwapRouter (exactInputSingle with tickSpacing)
@@ -258,6 +259,25 @@ _ARBITRUM_PAIR_CONFIG = [
 # ── Active chain pair config ───────────────────────────────────────────────────
 PAIR_CONFIG = _ARBITRUM_PAIR_CONFIG if CHAIN == "arbitrum" else _BASE_PAIR_CONFIG
 
+# ── Per-pair execution parameters ─────────────────────────────────────────────
+# Used by executor.py (_build_arb_params) and arb_detector.py (simulate_arb).
+# uni_fee:   Uniswap V3 fee tier integer (e.g. 500, 3000)
+# cake_fee:  PancakeSwap V3 fee tier integer (e.g. 500, 2500)
+# aero_tick: Aerodrome Slipstream tick spacing integer (e.g. 1, 100, 200)
+# All three fields must be present for every pair.
+_BASE_PAIR_EXEC_PARAMS: dict = {
+    "cbBTC/USDC":   {"uni_fee": 500,   "cake_fee": 500,  "aero_tick": 1},
+    "cbBTC/WETH":   {"uni_fee": 500,   "cake_fee": 500,  "aero_tick": 100},
+    "WETH/USDC":    {"uni_fee": 500,   "cake_fee": 500,  "aero_tick": 100},
+    "VIRTUAL/WETH": {"uni_fee": 3000,  "cake_fee": 2500, "aero_tick": 200},
+    "AERO/WETH":    {"uni_fee": 3000,  "cake_fee": 2500, "aero_tick": 200},
+    "DEGEN/WETH":   {"uni_fee": 3000,  "cake_fee": 2500, "aero_tick": 200},
+}
+_DEFAULT_PAIR_EXEC_PARAMS: dict = {"uni_fee": 500, "cake_fee": 500, "aero_tick": 100}
+
+# Active chain pair exec params — extend for Arbitrum when needed.
+PAIR_EXEC_PARAMS: dict       = _BASE_PAIR_EXEC_PARAMS
+
 # ── DEX config — 5 DEXes on Base ──────────────────────────────────────────────
 _BASE_DEX_CONFIG = [
     {
@@ -275,7 +295,7 @@ _BASE_DEX_CONFIG = [
         "factory": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
         "router":  "0x2626664c2603336E57B271c5C0b26F421741e481",
         "quoter":  "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
-        "fee_tiers": [100, 500, 3000, 10000],
+        "fee_tiers": [500, 3000, 10000, 100],
     },
     {
         "name": "Aerodrome vAMM",      # Uniswap V2 style
@@ -298,7 +318,7 @@ _BASE_DEX_CONFIG = [
         "factory": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
         "router":  "0x1b81D678ffb9C0263b24A97847620C99d213eB14",
         "quoter":  "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
-        "fee_tiers": [100, 500, 2500, 10000],
+        "fee_tiers": [500, 2500, 10000, 100],
     },
 ]
 

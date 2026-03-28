@@ -88,6 +88,19 @@
   },
   {
     "inputs": [],
+    "name": "CAKE_ROUTER",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "CBBTC",
     "outputs": [
       {
@@ -166,6 +179,45 @@
   },
   {
     "inputs": [],
+    "name": "VENUE_AERO",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "VENUE_CAKE",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "VENUE_UNI",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "WEETH",
     "outputs": [
       {
@@ -236,8 +288,23 @@
           },
           {
             "internalType": "uint24",
+            "name": "cakeFee",
+            "type": "uint24"
+          },
+          {
+            "internalType": "uint24",
             "name": "aeroTickSpacing",
             "type": "uint24"
+          },
+          {
+            "internalType": "uint8",
+            "name": "buyVenueId",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint8",
+            "name": "sellVenueId",
+            "type": "uint8"
           },
           {
             "internalType": "uint256",
@@ -263,11 +330,6 @@
             "internalType": "uint256",
             "name": "deadline",
             "type": "uint256"
-          },
-          {
-            "internalType": "bool",
-            "name": "buyOnUniswap",
-            "type": "bool"
           }
         ],
         "internalType": "struct ArbExecutor.ArbParams",

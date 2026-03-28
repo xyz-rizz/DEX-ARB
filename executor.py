@@ -23,31 +23,26 @@ import config
 _ROOT     = Path(__file__).resolve().parent
 _ABI_PATH = _ROOT / "contracts" / "ArbExecutor.abi.json"
 
-# Per-pair execution params for tx construction.
-# uniFee: Uniswap V3 fee tier (integer, e.g. 500)
-# aero_tick: Aerodrome Slipstream tick spacing (integer, e.g. 1)
-_PAIR_EXEC_PARAMS: dict = {
-    "cbBTC/USDC":   {"uni_fee": 500,   "aero_tick": 1},
-    "cbBTC/WETH":   {"uni_fee": 500,   "aero_tick": 100},
-    "weETH/WETH":   {"uni_fee": 100,   "aero_tick": 1},
-    "cbETH/WETH":   {"uni_fee": 500,   "aero_tick": 1},
-    "wstETH/WETH":  {"uni_fee": 100,   "aero_tick": 1},
-    "WETH/USDC":    {"uni_fee": 500,   "aero_tick": 100},
-    "EURC/USDC":    {"uni_fee": 500,   "aero_tick": 100},
-    "EURC/WETH":    {"uni_fee": 500,   "aero_tick": 100},
-    "USDC/USDbC":   {"uni_fee": 100,   "aero_tick": 1},
-    "DAI/USDC":     {"uni_fee": 100,   "aero_tick": 50},
-    "AERO/USDC":    {"uni_fee": 3000,  "aero_tick": 200},
-    "AERO/WETH":    {"uni_fee": 3000,  "aero_tick": 200},
-    "DEGEN/WETH":   {"uni_fee": 3000,  "aero_tick": 200},
-    "BRETT/WETH":   {"uni_fee": 10000, "aero_tick": 200},
-    "VIRTUAL/WETH": {"uni_fee": 3000,  "aero_tick": 200},
-    "TOSHI/WETH":   {"uni_fee": 10000, "aero_tick": 200},
-    "cbXRP/USDC":   {"uni_fee": 500,   "aero_tick": 200},
-    "MOG/WETH":     {"uni_fee": 10000, "aero_tick": 200},
-    "HIGHER/WETH":  {"uni_fee": 3000,  "aero_tick": 200},
-}
-_DEFAULT_EXEC_PARAMS = {"uni_fee": 500, "aero_tick": 100}
+# ── Venue ID constants (must match ArbExecutor.sol VENUE_* constants) ─────────
+_VENUE_UNI  = 0   # Uniswap V3 SwapRouter02
+_VENUE_CAKE = 1   # PancakeSwap V3 SwapRouter
+_VENUE_AERO = 2   # Aerodrome Slipstream CL SwapRouter
+
+
+def _venue_id(venue_name: str) -> int:
+    """Map scanner venue name to on-chain venue ID constant."""
+    n = venue_name.lower()
+    if "pancake" in n:
+        return _VENUE_CAKE
+    if "aerodrome" in n or "slipstream" in n:
+        return _VENUE_AERO
+    return _VENUE_UNI  # Uniswap, BaseSwap, or unknown → default to Uni path
+
+
+# Per-pair execution params imported from config (canonical source of truth).
+# Kept as module-level names so existing tests that import from executor still work.
+from config import PAIR_EXEC_PARAMS as _PAIR_EXEC_PARAMS          # noqa: E402
+from config import _DEFAULT_PAIR_EXEC_PARAMS as _DEFAULT_EXEC_PARAMS  # noqa: E402
 
 
 def _load_abi() -> list:
@@ -68,10 +63,19 @@ def _build_arb_params(
     Construct an ArbParams tuple for executeArb().
     Field order must match ArbExecutor.sol struct definition exactly.
 
-    Struct fields (in order):
-      tokenBorrow, tokenIntermediate, uniFee, aeroTickSpacing,
-      flashLoanAmount, minIntermediate, minRepayToken,
-      minProfit, deadline, buyOnUniswap
+    Struct fields (in order, 12 total):
+      [0]  tokenBorrow
+      [1]  tokenIntermediate
+      [2]  uniFee          (uint24)
+      [3]  cakeFee         (uint24)
+      [4]  aeroTickSpacing (uint24)
+      [5]  buyVenueId      (uint8)
+      [6]  sellVenueId     (uint8)
+      [7]  flashLoanAmount (uint256)
+      [8]  minIntermediate (uint256)
+      [9]  minRepayToken   (uint256)
+      [10] minProfit       (uint256)
+      [11] deadline        (uint256)
     """
     pair_cfg = next(
         (p for p in config.PAIR_CONFIG if p["name"] == opp.pair), None
@@ -112,26 +116,26 @@ def _build_arb_params(
     else:
         min_profit_raw = int(config.MIN_NET_PROFIT_USD * (10 ** dec_out))
 
-    # Buy-on-Uniswap flag
-    buy_on_uni = any(
-        v in opp.buy_venue
-        for v in ("Uniswap", "PancakeSwap", "BaseSwap")
-    )
+    # Venue IDs from scanner venue names
+    buy_venue_id  = _venue_id(opp.buy_venue)
+    sell_venue_id = _venue_id(opp.sell_venue)
 
-    # Fee / tick-spacing lookup
+    # Fee / tick-spacing lookup from canonical config
     ep = _PAIR_EXEC_PARAMS.get(opp.pair, _DEFAULT_EXEC_PARAMS)
 
     return (
-        Web3.to_checksum_address(token_borrow),   # tokenBorrow
-        Web3.to_checksum_address(token_inter),     # tokenIntermediate
-        ep["uni_fee"],                             # uniFee (uint24)
-        ep["aero_tick"],                           # aeroTickSpacing (int24)
-        flash_loan_raw,                            # flashLoanAmount
-        min_inter_raw,                             # minIntermediate
-        min_repay_raw,                             # minRepayToken
-        min_profit_raw,                            # minProfit
-        int(time.time()) + 300,                    # deadline
-        buy_on_uni,                                # buyOnUniswap
+        Web3.to_checksum_address(token_borrow),   # [0]  tokenBorrow
+        Web3.to_checksum_address(token_inter),     # [1]  tokenIntermediate
+        ep["uni_fee"],                             # [2]  uniFee (uint24)
+        ep["cake_fee"],                            # [3]  cakeFee (uint24)
+        ep["aero_tick"],                           # [4]  aeroTickSpacing (uint24)
+        buy_venue_id,                              # [5]  buyVenueId (uint8)
+        sell_venue_id,                             # [6]  sellVenueId (uint8)
+        flash_loan_raw,                            # [7]  flashLoanAmount
+        min_inter_raw,                             # [8]  minIntermediate
+        min_repay_raw,                             # [9]  minRepayToken
+        min_profit_raw,                            # [10] minProfit
+        int(time.time()) + 300,                    # [11] deadline
     )
 
 logger = logging.getLogger(__name__)

@@ -30,7 +30,8 @@ interface IBalancerVault {
     ) external;
 }
 
-/// @dev Uniswap V3 SwapRouter02 — exactInputSingle
+/// @dev Uniswap V3 SwapRouter02 / PancakeSwap V3 SwapRouter — exactInputSingle
+///      Both share this identical interface (no deadline field in SwapRouter02).
 interface ISwapRouter {
     struct ExactInputSingleParams {
         address tokenIn;
@@ -46,8 +47,7 @@ interface ISwapRouter {
         returns (uint256 amountOut);
 }
 
-/// @dev Aerodrome Slipstream router — identical struct to Uniswap V3 except
-///      tickSpacing replaces fee.
+/// @dev Aerodrome Slipstream CL router — tickSpacing replaces fee; has deadline.
 interface IAeroRouter {
     struct ExactInputSingleParams {
         address tokenIn;
@@ -65,8 +65,8 @@ interface IAeroRouter {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ArbExecutor — atomic flash-loan arbitrage between Aerodrome and Uniswap V3
-// Supports both Morpho and Balancer V2 as flash loan providers.
+// ArbExecutor — atomic flash-loan arbitrage across Uniswap V3, PancakeSwap V3,
+// and Aerodrome Slipstream. Supports both Morpho and Balancer V2 flash loans.
 // ─────────────────────────────────────────────────────────────────────────────
 
 contract ArbExecutor {
@@ -78,29 +78,36 @@ contract ArbExecutor {
     address public constant MORPHO          = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
     address public constant BALANCER_VAULT  = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
     address public constant UNI_ROUTER      = 0x2626664c2603336E57B271c5C0b26F421741e481;
+    address public constant CAKE_ROUTER     = 0x1b81D678ffb9C0263b24A97847620C99d213eB14;
     address public constant AERO_ROUTER     = 0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5;
     address public constant USDC            = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address public constant CBBTC           = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
     address public constant WETH            = 0x4200000000000000000000000000000000000006;
     address public constant WEETH           = 0x04C0599Ae5A44757c0af6F9eC3b93da8976c150A;
 
-    // ── Provider enum ─────────────────────────────────────────────────────────
+    // ── Provider IDs ─────────────────────────────────────────────────────────
     uint8 public constant PROVIDER_MORPHO   = 0;
     uint8 public constant PROVIDER_BALANCER = 1;
 
+    // ── Venue IDs ─────────────────────────────────────────────────────────────
+    uint8 public constant VENUE_UNI  = 0;   // Uniswap V3 SwapRouter02
+    uint8 public constant VENUE_CAKE = 1;   // PancakeSwap V3 SwapRouter
+    uint8 public constant VENUE_AERO = 2;   // Aerodrome Slipstream CL SwapRouter
+
     // ── Trade parameters struct ───────────────────────────────────────────────
     struct ArbParams {
-        address tokenBorrow;       // token to flash-loan (typically USDC)
-        address tokenIntermediate; // intermediate token (cbBTC, weETH, etc.)
+        address tokenBorrow;       // token to flash-loan (USDC or WETH)
+        address tokenIntermediate; // intermediate token (cbBTC, AERO, DEGEN, etc.)
         uint24  uniFee;            // Uniswap V3 fee tier (e.g. 500)
-        uint24  aeroTickSpacing;   // Aerodrome tick spacing (e.g. 1)
+        uint24  cakeFee;           // PancakeSwap V3 fee tier (e.g. 500, 2500)
+        uint24  aeroTickSpacing;   // Aerodrome Slipstream tick spacing (e.g. 1, 100, 200)
+        uint8   buyVenueId;        // VENUE_UNI | VENUE_CAKE | VENUE_AERO
+        uint8   sellVenueId;       // VENUE_UNI | VENUE_CAKE | VENUE_AERO
         uint256 flashLoanAmount;   // raw units of tokenBorrow to borrow
-        uint256 minIntermediate;   // min intermediate from first swap (slippage guard)
-        uint256 minRepayToken;     // min borrow-token from second swap (slippage guard)
+        uint256 minIntermediate;   // min intermediate from buy leg (slippage guard)
+        uint256 minRepayToken;     // min borrow-token from sell leg (slippage guard)
         uint256 minProfit;         // minimum profit in tokenBorrow — revert if below
         uint256 deadline;          // unix timestamp — revert if exceeded
-        bool    buyOnUniswap;      // true → buy intermediate on Uni, sell on Aero
-                                   // false → buy intermediate on Aero, sell on Uni
     }
 
     // Temporary storage for flash loan callback (re-entrancy guard doubles as storage)
@@ -131,13 +138,16 @@ contract ArbExecutor {
 
     /**
      * @notice Execute an atomic arbitrage using the specified flash loan provider.
-     * @param params    Trade parameters.
+     * @param params    Trade parameters including venue IDs for routing.
      * @param provider  0 = Morpho, 1 = Balancer.
      */
     function executeArb(ArbParams calldata params, uint8 provider) external onlyOwner {
         require(block.timestamp <= params.deadline, "ArbExecutor: deadline passed");
         require(params.flashLoanAmount > 0, "ArbExecutor: zero flash loan");
         require(!_inFlashLoan, "ArbExecutor: reentrant");
+        require(params.buyVenueId <= VENUE_AERO, "ArbExecutor: bad buy venue");
+        require(params.sellVenueId <= VENUE_AERO, "ArbExecutor: bad sell venue");
+        require(params.buyVenueId != params.sellVenueId, "ArbExecutor: same venue");
 
         _pendingParams = params;
         _inFlashLoan = true;
@@ -205,100 +215,95 @@ contract ArbExecutor {
         IERC20(tokens[0]).transfer(BALANCER_VAULT, assets);
     }
 
-    // ── Internal arb execution (shared by both callbacks) ─────────────────────
+    // ── Internal swap leg dispatcher ──────────────────────────────────────────
+
+    /**
+     * @dev Execute a single swap leg on the specified venue.
+     *      Handles approve → swap → revoke for all three router types.
+     */
+    function _swapLeg(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOutMinimum,
+        uint8   venueId,
+        uint24  uniFee,
+        uint24  cakeFee,
+        uint24  aeroTick,
+        uint256 deadline
+    ) internal returns (uint256 amountOut) {
+        if (venueId == VENUE_AERO) {
+            IERC20(tokenIn).approve(AERO_ROUTER, amountIn);
+            amountOut = IAeroRouter(AERO_ROUTER).exactInputSingle(
+                IAeroRouter.ExactInputSingleParams({
+                    tokenIn:           tokenIn,
+                    tokenOut:          tokenOut,
+                    tickSpacing:       aeroTick,
+                    recipient:         address(this),
+                    deadline:          deadline,
+                    amountIn:          amountIn,
+                    amountOutMinimum:  amountOutMinimum,
+                    sqrtPriceLimitX96: 0
+                })
+            );
+            IERC20(tokenIn).approve(AERO_ROUTER, 0);
+        } else {
+            // VENUE_UNI or VENUE_CAKE — both use ISwapRouter interface
+            address router = (venueId == VENUE_CAKE) ? CAKE_ROUTER : UNI_ROUTER;
+            uint24  fee    = (venueId == VENUE_CAKE) ? cakeFee     : uniFee;
+            IERC20(tokenIn).approve(router, amountIn);
+            amountOut = ISwapRouter(router).exactInputSingle(
+                ISwapRouter.ExactInputSingleParams({
+                    tokenIn:           tokenIn,
+                    tokenOut:          tokenOut,
+                    fee:               fee,
+                    recipient:         address(this),
+                    amountIn:          amountIn,
+                    amountOutMinimum:  amountOutMinimum,
+                    sqrtPriceLimitX96: 0
+                })
+            );
+            IERC20(tokenIn).approve(router, 0);
+        }
+    }
+
+    // ── Internal arb execution (shared by both flash loan callbacks) ──────────
 
     function _executeArbInternal(uint256 assets, uint8 provider) internal {
         ArbParams memory p = _pendingParams;
         require(block.timestamp <= p.deadline, "ArbExecutor: deadline in callback");
 
-        uint256 intermediateReceived;
+        // Step 1: tokenBorrow → tokenIntermediate on buy venue
+        uint256 intermediateReceived = _swapLeg(
+            p.tokenBorrow, p.tokenIntermediate,
+            assets, p.minIntermediate,
+            p.buyVenueId, p.uniFee, p.cakeFee, p.aeroTickSpacing, p.deadline
+        );
 
-        if (p.buyOnUniswap) {
-            // Step 1: tokenBorrow → tokenIntermediate on Uniswap V3
-            IERC20(p.tokenBorrow).approve(UNI_ROUTER, assets);
-            intermediateReceived = ISwapRouter(UNI_ROUTER).exactInputSingle(
-                ISwapRouter.ExactInputSingleParams({
-                    tokenIn:           p.tokenBorrow,
-                    tokenOut:          p.tokenIntermediate,
-                    fee:               p.uniFee,
-                    recipient:         address(this),
-                    amountIn:          assets,
-                    amountOutMinimum:  p.minIntermediate,
-                    sqrtPriceLimitX96: 0
-                })
-            );
-            IERC20(p.tokenBorrow).approve(UNI_ROUTER, 0);
+        // Step 2: tokenIntermediate → tokenBorrow on sell venue
+        _swapLeg(
+            p.tokenIntermediate, p.tokenBorrow,
+            intermediateReceived, p.minRepayToken,
+            p.sellVenueId, p.uniFee, p.cakeFee, p.aeroTickSpacing, p.deadline
+        );
 
-            // Step 2: tokenIntermediate → tokenBorrow on Aerodrome
-            IERC20(p.tokenIntermediate).approve(AERO_ROUTER, intermediateReceived);
-            IAeroRouter(AERO_ROUTER).exactInputSingle(
-                IAeroRouter.ExactInputSingleParams({
-                    tokenIn:           p.tokenIntermediate,
-                    tokenOut:          p.tokenBorrow,
-                    tickSpacing:       p.aeroTickSpacing,
-                    recipient:         address(this),
-                    deadline:          p.deadline,
-                    amountIn:          intermediateReceived,
-                    amountOutMinimum:  p.minRepayToken,
-                    sqrtPriceLimitX96: 0
-                })
-            );
-            IERC20(p.tokenIntermediate).approve(AERO_ROUTER, 0);
-
-        } else {
-            // Step 1: tokenBorrow → tokenIntermediate on Aerodrome
-            IERC20(p.tokenBorrow).approve(AERO_ROUTER, assets);
-            intermediateReceived = IAeroRouter(AERO_ROUTER).exactInputSingle(
-                IAeroRouter.ExactInputSingleParams({
-                    tokenIn:           p.tokenBorrow,
-                    tokenOut:          p.tokenIntermediate,
-                    tickSpacing:       p.aeroTickSpacing,
-                    recipient:         address(this),
-                    deadline:          p.deadline,
-                    amountIn:          assets,
-                    amountOutMinimum:  p.minIntermediate,
-                    sqrtPriceLimitX96: 0
-                })
-            );
-            IERC20(p.tokenBorrow).approve(AERO_ROUTER, 0);
-
-            // Step 2: tokenIntermediate → tokenBorrow on Uniswap V3
-            IERC20(p.tokenIntermediate).approve(UNI_ROUTER, intermediateReceived);
-            ISwapRouter(UNI_ROUTER).exactInputSingle(
-                ISwapRouter.ExactInputSingleParams({
-                    tokenIn:           p.tokenIntermediate,
-                    tokenOut:          p.tokenBorrow,
-                    fee:               p.uniFee,
-                    recipient:         address(this),
-                    amountIn:          intermediateReceived,
-                    amountOutMinimum:  p.minRepayToken,
-                    sqrtPriceLimitX96: 0
-                })
-            );
-            IERC20(p.tokenIntermediate).approve(UNI_ROUTER, 0);
-        }
-
-        // Step 3: Verify balance to cover repayment + profit
+        // Step 3: Verify balance, enforce minimum profit, distribute
         uint256 balance = IERC20(p.tokenBorrow).balanceOf(address(this));
 
         if (provider == PROVIDER_MORPHO) {
-            // Morpho pulls repayment — approve it
             require(balance >= assets, "ArbExecutor: insufficient to repay Morpho");
             IERC20(p.tokenBorrow).approve(MORPHO, assets);
-            // balance check after approval:
             uint256 profit = balance - assets;
             require(profit >= p.minProfit, "ArbExecutor: profit below minimum");
             IERC20(p.tokenBorrow).transfer(owner, profit);
             emit ArbExecuted(p.tokenBorrow, assets, profit, provider);
         } else {
-            // Balancer: receiveFlashLoan transfers repayment after this call returns
-            // Here we just check we have enough and compute profit
+            // Balancer: receiveFlashLoan() transfers repayment after this call returns
             require(balance >= assets, "ArbExecutor: insufficient to repay Balancer");
             uint256 profit = balance - assets;
             require(profit >= p.minProfit, "ArbExecutor: profit below minimum");
             IERC20(p.tokenBorrow).transfer(owner, profit);
             emit ArbExecuted(p.tokenBorrow, assets, profit, provider);
-            // NOTE: receiveFlashLoan() transfers 'assets' back to Vault after this returns
         }
     }
 

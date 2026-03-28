@@ -376,7 +376,166 @@ def test_deadline_is_dynamic():
 
     before = int(time.time())
     params = _build_arb_params(opp, sim, eth_price=2000.0)
-    deadline = params[8]  # index 8 = deadline field
+    deadline = params[11]  # index 11 = deadline (new 12-field struct)
 
     assert deadline > before + 60, f"Deadline not far enough in future: {deadline} vs now={before}"
     assert deadline < before + 600, f"Deadline suspiciously far in future: {deadline}"
+
+
+# ── Venue ID / PancakeSwap routing tests ──────────────────────────────────────
+
+def test_venue_id_uniswap():
+    """Uniswap V3 buy/sell venue → VENUE_UNI (0)."""
+    from executor import _venue_id, _VENUE_UNI
+    assert _venue_id("Uniswap V3") == _VENUE_UNI
+    assert _venue_id("Uniswap") == _VENUE_UNI
+
+
+def test_venue_id_pancakeswap():
+    """PancakeSwap V3 buy/sell venue → VENUE_CAKE (1)."""
+    from executor import _venue_id, _VENUE_CAKE
+    assert _venue_id("PancakeSwap V3") == _VENUE_CAKE
+    assert _venue_id("PancakeSwap") == _VENUE_CAKE
+
+
+def test_venue_id_aerodrome():
+    """Aerodrome Slipstream venue → VENUE_AERO (2)."""
+    from executor import _venue_id, _VENUE_AERO
+    assert _venue_id("Aerodrome Slipstream") == _VENUE_AERO
+    assert _venue_id("Aerodrome") == _VENUE_AERO
+
+
+def test_venue_id_unknown_defaults_to_uni():
+    """Unknown venue name defaults to VENUE_UNI to avoid silent mismatch."""
+    from executor import _venue_id, _VENUE_UNI
+    assert _venue_id("BaseSwap") == _VENUE_UNI
+    assert _venue_id("SomeNewDex") == _VENUE_UNI
+
+
+def test_build_arb_params_pancake_buy_sets_venue_cake():
+    """PancakeSwap buy venue → buyVenueId=VENUE_CAKE at params[5]."""
+    import time
+    from executor import _build_arb_params, _VENUE_CAKE, _VENUE_AERO
+    from arb_detector import ArbOpportunity, SimResult
+
+    opp = ArbOpportunity(
+        pair="WETH/USDC",
+        buy_venue="PancakeSwap V3",
+        sell_venue="Aerodrome Slipstream",
+        buy_price=2000.0, sell_price=2010.0,
+        gross_spread_pct=0.5, total_fee_pct=0.06, net_spread_pct=0.44,
+        flash_loan_usdc=5000.0, estimated_profit_usdc=22.0,
+        is_profitable=True, timestamp=time.time(), tier="GOOD",
+    )
+    sim = SimResult(
+        buy_dex="PancakeSwap V3", sell_dex="Aerodrome Slipstream",
+        token_amount=2.49, usdc_in=5000.0, usdc_out=5022.0,
+        gross_profit_usd=22.0, gas_cost_usd=0.5, net_profit_usd=21.5,
+        flash_provider="Morpho", is_executable=True, rejection_reason="",
+    )
+    params = _build_arb_params(opp, sim, eth_price=2000.0)
+
+    assert params[5] == _VENUE_CAKE, f"buyVenueId expected VENUE_CAKE={_VENUE_CAKE}, got {params[5]}"
+    assert params[6] == _VENUE_AERO, f"sellVenueId expected VENUE_AERO={_VENUE_AERO}, got {params[6]}"
+
+
+def test_build_arb_params_uni_buy_aero_sell():
+    """Uniswap buy + Aerodrome sell → correct venue IDs at params[5] and params[6]."""
+    import time
+    from executor import _build_arb_params, _VENUE_UNI, _VENUE_AERO
+    from arb_detector import ArbOpportunity, SimResult
+
+    opp = ArbOpportunity(
+        pair="cbBTC/USDC",
+        buy_venue="Uniswap V3",
+        sell_venue="Aerodrome Slipstream",
+        buy_price=65000.0, sell_price=65200.0,
+        gross_spread_pct=0.31, total_fee_pct=0.06, net_spread_pct=0.25,
+        flash_loan_usdc=17000.0, estimated_profit_usdc=42.0,
+        is_profitable=True, timestamp=time.time(), tier="GOOD",
+    )
+    sim = SimResult(
+        buy_dex="Uniswap V3", sell_dex="Aerodrome Slipstream",
+        token_amount=0.249, usdc_in=17000.0, usdc_out=17042.0,
+        gross_profit_usd=42.0, gas_cost_usd=0.5, net_profit_usd=41.5,
+        flash_provider="Morpho", is_executable=True, rejection_reason="",
+    )
+    params = _build_arb_params(opp, sim, eth_price=2000.0)
+
+    assert params[5] == _VENUE_UNI,  f"buyVenueId={params[5]}, want {_VENUE_UNI}"
+    assert params[6] == _VENUE_AERO, f"sellVenueId={params[6]}, want {_VENUE_AERO}"
+
+
+def test_build_arb_params_has_12_fields():
+    """_build_arb_params must return exactly 12 elements (new struct)."""
+    import time
+    from executor import _build_arb_params
+    from arb_detector import ArbOpportunity, SimResult
+
+    opp = ArbOpportunity(
+        pair="WETH/USDC",
+        buy_venue="Uniswap V3",
+        sell_venue="Aerodrome Slipstream",
+        buy_price=2000.0, sell_price=2010.0,
+        gross_spread_pct=0.5, total_fee_pct=0.06, net_spread_pct=0.44,
+        flash_loan_usdc=5000.0, estimated_profit_usdc=22.0,
+        is_profitable=True, timestamp=time.time(), tier="GOOD",
+    )
+    sim = SimResult(
+        buy_dex="Uniswap V3", sell_dex="Aerodrome Slipstream",
+        token_amount=2.49, usdc_in=5000.0, usdc_out=5022.0,
+        gross_profit_usd=22.0, gas_cost_usd=0.5, net_profit_usd=21.5,
+        flash_provider="Morpho", is_executable=True, rejection_reason="",
+    )
+    params = _build_arb_params(opp, sim, eth_price=2000.0)
+    assert len(params) == 12, f"Expected 12-field tuple, got {len(params)}: {params}"
+
+
+def test_pair_exec_params_has_cake_fee():
+    """Every active pair in PAIR_EXEC_PARAMS must have a cake_fee field."""
+    import config as cfg
+    for pair_name, ep in cfg._BASE_PAIR_EXEC_PARAMS.items():
+        assert "cake_fee" in ep, f"{pair_name} missing cake_fee in PAIR_EXEC_PARAMS"
+        assert ep["cake_fee"] > 0, f"{pair_name}.cake_fee must be > 0"
+
+
+def test_pair_exec_params_no_fee_tier_as_aero_tick():
+    """aero_tick must be a Slipstream tick spacing (1/50/100/200), not a Uni fee tier."""
+    import config as cfg
+    valid_ticks = {1, 50, 100, 200}
+    for pair_name, ep in cfg._BASE_PAIR_EXEC_PARAMS.items():
+        tick = ep["aero_tick"]
+        assert tick in valid_ticks, (
+            f"{pair_name}.aero_tick={tick} is not a valid Slipstream tick spacing "
+            f"(must be one of {sorted(valid_ticks)})"
+        )
+
+
+def test_pancakeswap_v3_router_in_config():
+    """config.PANCAKESWAP_V3_ROUTER must be set and checksummed."""
+    from web3 import Web3
+    import config as cfg
+    addr = cfg.PANCAKESWAP_V3_ROUTER
+    assert addr, "PANCAKESWAP_V3_ROUTER is empty"
+    assert addr == Web3.to_checksum_address(addr), f"Not checksummed: {addr}"
+    assert "1b81" in addr.lower(), f"Unexpected PANCAKESWAP_V3_ROUTER address: {addr}"
+
+
+def test_uni_fee_tiers_deep_pool_first():
+    """Uniswap V3 fee_tiers must start with 500 (deepest WETH/USDC pool), not 100."""
+    import config as cfg
+    uni = next((d for d in cfg._BASE_DEX_CONFIG if d["name"] == "Uniswap V3"), None)
+    assert uni is not None, "Uniswap V3 not in _BASE_DEX_CONFIG"
+    assert uni["fee_tiers"][0] == 500, (
+        f"Expected fee_tiers[0]=500 (deepest pool first), got {uni['fee_tiers']}"
+    )
+
+
+def test_pancake_fee_tiers_deep_pool_first():
+    """PancakeSwap V3 fee_tiers must start with 500 (deepest pool), not 100."""
+    import config as cfg
+    cake = next((d for d in cfg._BASE_DEX_CONFIG if d["name"] == "PancakeSwap V3"), None)
+    assert cake is not None, "PancakeSwap V3 not in _BASE_DEX_CONFIG"
+    assert cake["fee_tiers"][0] == 500, (
+        f"Expected fee_tiers[0]=500 (deepest pool first), got {cake['fee_tiers']}"
+    )

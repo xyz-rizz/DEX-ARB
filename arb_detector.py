@@ -655,7 +655,7 @@ def _get_dex_best_fee(dex_name: str, token_in: str, token_out: str,
                       w3: Web3) -> int:
     """
     Find the best fee tier for a V3 DEX pair (highest TVL proxy: first non-zero pool).
-    Returns 0 if unknown.
+    Returns 0 if unknown. Fee-tier lists are ordered deepest-pool-first in config.
     """
     from price_scanner import get_uniswap_pool, _ZERO_ADDRESS
     for dex in config.DEX_CONFIG:
@@ -668,6 +668,23 @@ def _get_dex_best_fee(dex_name: str, token_in: str, token_out: str,
                 except Exception:
                     continue
     return 0
+
+
+def _get_exec_fee(pair_name: str, venue_name: str) -> int:
+    """
+    Return the canonical execution fee for (pair, venue) from config.PAIR_EXEC_PARAMS.
+
+    This is the fee used for the live contract call — guaranteed to match executor.py.
+    For Aerodrome Slipstream, returns aero_tick (used as tickSpacing in the quoter).
+    Falls back to 500 if the pair is not in PAIR_EXEC_PARAMS.
+    """
+    ep = config.PAIR_EXEC_PARAMS.get(pair_name, config._DEFAULT_PAIR_EXEC_PARAMS)
+    n = venue_name.lower()
+    if "pancake" in n:
+        return ep["cake_fee"]
+    if "aerodrome" in n or "slipstream" in n:
+        return ep["aero_tick"]
+    return ep["uni_fee"]  # Uniswap V3, BaseSwap, or unknown → uni_fee
 
 
 def simulate_arb(w3: Web3, opp: ArbOpportunity) -> SimResult:
@@ -747,7 +764,7 @@ def simulate_arb(w3: Web3, opp: ArbOpportunity) -> SimResult:
     # Buy leg simulation
     try:
         if buy_quoter:
-            fee = _get_dex_best_fee(opp.buy_venue, borrow_token, intermediate, w3)
+            fee = _get_exec_fee(opp.pair, opp.buy_venue)
             if fee == 0:
                 fee = 500  # fallback
             q = w3.eth.contract(
@@ -782,7 +799,7 @@ def simulate_arb(w3: Web3, opp: ArbOpportunity) -> SimResult:
     token_raw = int(token_amount * (10 ** inter_dec))
     try:
         if sell_quoter:
-            fee = _get_dex_best_fee(opp.sell_venue, intermediate, borrow_token, w3)
+            fee = _get_exec_fee(opp.pair, opp.sell_venue)
             if fee == 0:
                 fee = 500
             q = w3.eth.contract(
