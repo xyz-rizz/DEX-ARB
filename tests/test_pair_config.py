@@ -1,6 +1,6 @@
 """
 Tests for PAIR_CONFIG update:
-  - Exactly 8 pairs (VIRTUAL/cbBTC and EURC/WETH added)
+  - Exactly 6 pairs (WETH/USDC, AERO/WETH, DEGEN/WETH added; dead pairs removed)
   - Dead pairs removed
   - New pairs have required fields and valid addresses
   - Kept pairs unchanged
@@ -13,34 +13,34 @@ from web3 import Web3
 EXPECTED_PAIRS = {
     "cbBTC/USDC",
     "cbBTC/WETH",
+    "WETH/USDC",
     "VIRTUAL/WETH",
+    "AERO/WETH",
+    "DEGEN/WETH",
+}
+
+REMOVED_PAIRS = [
+    # Removed: tiny liquidity / fee-choked / exotic / no observed edge
     "EURC/USDC",
     "USDC/USDT",
     "AERO/USDC",
     "VIRTUAL/cbBTC",
     "EURC/WETH",
-}
-
-REMOVED_PAIRS = [
-    # Removed in this update
-    "WETH/USDC",   # too competitive — 9 on-chain reverts, spread closes <1 block
-    "BRETT/WETH",  # phantom pool — PancakeSwap price=0, ~2000% garbage spread
-    # Removed in prior update
+    # Removed in prior update: phantom pool (PancakeSwap price=0)
+    "BRETT/WETH",
+    # Removed in earlier update
     "weETH/WETH",
     "cbETH/WETH",
     "wstETH/WETH",
     "USDC/USDbC",
     "DAI/USDC",
-    "DEGEN/WETH",
     "TOSHI/WETH",
     "cbXRP/USDC",
     "MOG/WETH",
     "HIGHER/WETH",
-    "AERO/WETH",
 ]
 
-NEW_PAIRS = ["cbBTC/WETH", "EURC/USDC", "USDC/USDT", "AERO/USDC",
-             "VIRTUAL/cbBTC", "EURC/WETH"]
+NEW_PAIRS = ["WETH/USDC", "AERO/WETH", "DEGEN/WETH"]
 
 REQUIRED_FIELDS = ["name", "token_in", "token_out", "dec_in", "dec_out",
                    "unit_size", "min_liquidity_usd"]
@@ -53,11 +53,11 @@ def _pair(name: str) -> dict:
 
 # ── Test 1 ─────────────────────────────────────────────────────────────────────
 
-def test_pair_config_has_exactly_8_pairs():
-    """PAIR_CONFIG must contain exactly 8 pairs with the expected names."""
+def test_pair_config_has_exactly_6_pairs():
+    """PAIR_CONFIG must contain exactly 6 pairs with the expected names."""
     from config import PAIR_CONFIG
-    assert len(PAIR_CONFIG) == 8, (
-        f"Expected 8 pairs, got {len(PAIR_CONFIG)}: {[p['name'] for p in PAIR_CONFIG]}"
+    assert len(PAIR_CONFIG) == 6, (
+        f"Expected 6 pairs, got {len(PAIR_CONFIG)}: {[p['name'] for p in PAIR_CONFIG]}"
     )
     names = {p["name"] for p in PAIR_CONFIG}
     assert names == EXPECTED_PAIRS, (
@@ -70,7 +70,7 @@ def test_pair_config_has_exactly_8_pairs():
 # ── Test 2 ─────────────────────────────────────────────────────────────────────
 
 def test_removed_pairs_not_in_config():
-    """All dead pairs (including BRETT/WETH and WETH/USDC) must be absent from PAIR_CONFIG."""
+    """All dead pairs must be absent from PAIR_CONFIG."""
     from config import PAIR_CONFIG
     names = {p["name"] for p in PAIR_CONFIG}
     still_present = [r for r in REMOVED_PAIRS if r in names]
@@ -86,13 +86,6 @@ def test_brett_weth_not_in_config():
     from config import PAIR_CONFIG
     names = [p["name"] for p in PAIR_CONFIG]
     assert "BRETT/WETH" not in names
-
-
-def test_weth_usdc_not_in_config():
-    """WETH/USDC removed: most competitive pair on Base, 9 confirmed on-chain reverts."""
-    from config import PAIR_CONFIG
-    names = [p["name"] for p in PAIR_CONFIG]
-    assert "WETH/USDC" not in names
 
 
 # ── Test 3 ─────────────────────────────────────────────────────────────────────
@@ -154,33 +147,36 @@ def test_existing_pairs_unchanged():
     assert cbbtc_weth["dec_out"] == 18
 
 
-# ── Test 5 ─────────────────────────────────────────────────────────────────────
+# ── Test 5: New pair field checks ──────────────────────────────────────────────
 
-def test_virtual_cbbtc_fields():
-    """VIRTUAL/cbBTC: correct addresses, dec_in=18, dec_out=8, unit_size=1000."""
-    p = _pair("VIRTUAL/cbBTC")
-    assert p["token_in"].lower()  == "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b"
-    assert p["token_out"].lower() == "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+def test_weth_usdc_fields():
+    """WETH/USDC: correct addresses, dec_in=18, dec_out=6, unit_size=1.0."""
+    p = _pair("WETH/USDC")
+    assert p["token_in"].lower()  == "0x4200000000000000000000000000000000000006"
+    assert p["token_out"].lower() == "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
     assert p["dec_in"]  == 18
-    assert p["dec_out"] == 8
-    assert p["unit_size"] == 1000.0
-    assert p["min_liquidity_usd"] == 50_000
+    assert p["dec_out"] == 6
+    assert p["unit_size"] == 1.0
+    assert p["min_liquidity_usd"] == 200_000
 
 
-def test_eurc_weth_fields():
-    """EURC/WETH: correct addresses, dec_in=6, dec_out=18, unit_size=1000."""
-    p = _pair("EURC/WETH")
-    assert p["token_in"].lower()  == "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42"
+def test_aero_weth_fields():
+    """AERO/WETH: correct addresses, dec_in=18, dec_out=18, unit_size=1000."""
+    p = _pair("AERO/WETH")
+    assert p["token_in"].lower()  == "0x940181a94a35a4569e4529a3cdfb74e38fd98631"
     assert p["token_out"].lower() == "0x4200000000000000000000000000000000000006"
-    assert p["dec_in"]  == 6
+    assert p["dec_in"]  == 18
     assert p["dec_out"] == 18
     assert p["unit_size"] == 1000.0
     assert p["min_liquidity_usd"] == 50_000
 
 
-def test_dead_pairs_still_absent():
-    """BRETT/WETH and WETH/USDC must remain absent after the new additions."""
-    from config import PAIR_CONFIG
-    names = [p["name"] for p in PAIR_CONFIG]
-    assert "BRETT/WETH" not in names
-    assert "WETH/USDC"  not in names
+def test_degen_weth_fields():
+    """DEGEN/WETH: correct addresses, dec_in=18, dec_out=18, unit_size=100000."""
+    p = _pair("DEGEN/WETH")
+    assert p["token_in"].lower()  == "0x4ed4e862860bed51a9570b96d89af5e1b0efefed"
+    assert p["token_out"].lower() == "0x4200000000000000000000000000000000000006"
+    assert p["dec_in"]  == 18
+    assert p["dec_out"] == 18
+    assert p["unit_size"] == 100000.0
+    assert p["min_liquidity_usd"] == 30_000

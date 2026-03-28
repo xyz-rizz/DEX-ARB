@@ -178,8 +178,8 @@ def test_arbitrum_balancer_vault_address_correct():
 
 # ── 5. Base behaviour unchanged ────────────────────────────────────────────────
 
-def test_base_pair_config_still_has_8_pairs():
-    assert len(config._BASE_PAIR_CONFIG) == 8
+def test_base_pair_config_still_has_6_pairs():
+    assert len(config._BASE_PAIR_CONFIG) == 6
 
 
 def test_base_dex_config_still_has_5_venues():
@@ -200,7 +200,7 @@ def test_pair_config_resolves_to_base_by_default():
     """When CHAIN='base', PAIR_CONFIG must be the Base pair list."""
     with patch.object(config, "CHAIN", "base"), \
          patch.object(config, "PAIR_CONFIG", config._BASE_PAIR_CONFIG):
-        assert len(config.PAIR_CONFIG) == 8
+        assert len(config.PAIR_CONFIG) == 6
 
 
 def test_dex_config_resolves_to_base_by_default():

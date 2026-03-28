@@ -151,8 +151,15 @@ CHAIN_ID:          int = ARBITRUM_CHAIN_ID if CHAIN == "arbitrum" else BASE_CHAI
 # ── Pair config ───────────────────────────────────────────────────────────────
 # PAIR_CONFIG resolves to the active chain's pairs at import time.
 # Base history note:
-#   Removed WETH/USDC (9 reverts — spread <1 block, cycle 2.5s)
 #   Removed BRETT/WETH (phantom pool — PancakeSwap price=0)
+#   Removed EURC/USDC (tiny liquidity ~27B LP ticks, fee choked)
+#   Removed USDC/USDT (near-zero spread confirmed across multiple cycles)
+#   Removed AERO/USDC (depth-rejected at all tested flash sizes)
+#   Removed VIRTUAL/cbBTC (exotic pair, no observed edge)
+#   Removed EURC/WETH (exotic pair, no observed edge)
+#   Added WETH/USDC (primary target — massive depth all 3 venues; prior reverts were wrong-router only)
+#   Added AERO/WETH (two deep venues: Uni fee=3000 + Aero tick=200)
+#   Added DEGEN/WETH (three venues: massive Uni depth + Cake + Aero)
 _BASE_PAIR_CONFIG = [
     {
         "name": "cbBTC/USDC",
@@ -171,6 +178,14 @@ _BASE_PAIR_CONFIG = [
         "min_liquidity_usd": 100_000,
     },
     {
+        "name": "WETH/USDC",
+        "token_in":  "0x4200000000000000000000000000000000000006",
+        "token_out": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "dec_in": 18, "dec_out": 6,
+        "unit_size": 1.0,
+        "min_liquidity_usd": 200_000,
+    },
+    {
         "name": "VIRTUAL/WETH",
         "token_in":  "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b",
         "token_out": "0x4200000000000000000000000000000000000006",
@@ -179,44 +194,20 @@ _BASE_PAIR_CONFIG = [
         "min_liquidity_usd": 30_000,
     },
     {
-        "name": "EURC/USDC",
-        "token_in":  "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",
-        "token_out": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "dec_in": 6, "dec_out": 6,
-        "unit_size": 1000.0,
-        "min_liquidity_usd": 50_000,
-    },
-    {
-        "name": "USDC/USDT",
-        "token_in":  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "token_out": "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
-        "dec_in": 6, "dec_out": 6,
-        "unit_size": 10000.0,
-        "min_liquidity_usd": 100_000,
-    },
-    {
-        "name": "AERO/USDC",
+        "name": "AERO/WETH",
         "token_in":  "0x940181a94A35A4569E4529A3CDfB74e38FD98631",
-        "token_out": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "dec_in": 18, "dec_out": 6,
-        "unit_size": 1000.0,
-        "min_liquidity_usd": 50_000,
-    },
-    {
-        "name": "VIRTUAL/cbBTC",
-        "token_in":  "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b",
-        "token_out": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
-        "dec_in": 18, "dec_out": 8,
-        "unit_size": 1000.0,
-        "min_liquidity_usd": 50_000,
-    },
-    {
-        "name": "EURC/WETH",
-        "token_in":  "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",
         "token_out": "0x4200000000000000000000000000000000000006",
-        "dec_in": 6, "dec_out": 18,
+        "dec_in": 18, "dec_out": 18,
         "unit_size": 1000.0,
         "min_liquidity_usd": 50_000,
+    },
+    {
+        "name": "DEGEN/WETH",
+        "token_in":  "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed",
+        "token_out": "0x4200000000000000000000000000000000000006",
+        "dec_in": 18, "dec_out": 18,
+        "unit_size": 100000.0,
+        "min_liquidity_usd": 30_000,
     },
 ]
 
