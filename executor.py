@@ -28,12 +28,16 @@ _ABI_PATH = _ROOT / "contracts" / "ArbExecutor.abi.json"
 # aero_tick: Aerodrome Slipstream tick spacing (integer, e.g. 1)
 _PAIR_EXEC_PARAMS: dict = {
     "cbBTC/USDC":   {"uni_fee": 500,   "aero_tick": 1},
+    "cbBTC/WETH":   {"uni_fee": 500,   "aero_tick": 100},
     "weETH/WETH":   {"uni_fee": 100,   "aero_tick": 1},
     "cbETH/WETH":   {"uni_fee": 500,   "aero_tick": 1},
     "wstETH/WETH":  {"uni_fee": 100,   "aero_tick": 1},
-    "WETH/USDC":    {"uni_fee": 500,   "aero_tick": 200},
+    "WETH/USDC":    {"uni_fee": 500,   "aero_tick": 100},
+    "EURC/USDC":    {"uni_fee": 500,   "aero_tick": 100},
+    "EURC/WETH":    {"uni_fee": 500,   "aero_tick": 100},
     "USDC/USDbC":   {"uni_fee": 100,   "aero_tick": 1},
     "DAI/USDC":     {"uni_fee": 100,   "aero_tick": 50},
+    "AERO/USDC":    {"uni_fee": 3000,  "aero_tick": 200},
     "AERO/WETH":    {"uni_fee": 3000,  "aero_tick": 200},
     "DEGEN/WETH":   {"uni_fee": 3000,  "aero_tick": 200},
     "BRETT/WETH":   {"uni_fee": 10000, "aero_tick": 200},
@@ -43,7 +47,7 @@ _PAIR_EXEC_PARAMS: dict = {
     "MOG/WETH":     {"uni_fee": 10000, "aero_tick": 200},
     "HIGHER/WETH":  {"uni_fee": 3000,  "aero_tick": 200},
 }
-_DEFAULT_EXEC_PARAMS = {"uni_fee": 500, "aero_tick": 50}
+_DEFAULT_EXEC_PARAMS = {"uni_fee": 500, "aero_tick": 100}
 
 
 def _load_abi() -> list:
@@ -126,7 +130,7 @@ def _build_arb_params(
         min_inter_raw,                             # minIntermediate
         min_repay_raw,                             # minRepayToken
         min_profit_raw,                            # minProfit
-        int(time.time()) + 60,                     # deadline
+        int(time.time()) + 300,                    # deadline
         buy_on_uni,                                # buyOnUniswap
     )
 

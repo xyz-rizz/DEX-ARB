@@ -290,3 +290,93 @@ def test_execute_arb_stub_when_no_contract():
     assert result.tag == "STUB"
     assert result.reason == "no_contract_address"
     assert result.estimated_profit_usd == sim.net_profit_usd
+
+
+# ── Aerodrome router / tickSpacing / deadline fix tests ────────────────────────
+
+def test_slipstream_uses_correct_router():
+    """config.py must reference the Slipstream SwapRouter (0xBE6D...), not the vAMM router (0xcf77...)."""
+    import config as cfg
+    slipstream_router = cfg.AERODROME_SLIPSTREAM_ROUTER.lower()
+    assert "be6d8f0d" in slipstream_router, \
+        f"Slipstream SwapRouter not in config; got {cfg.AERODROME_SLIPSTREAM_ROUTER}"
+
+
+def test_slipstream_dex_config_uses_correct_router():
+    """DEX_CONFIG 'Aerodrome Slipstream' entry must use SwapRouter (0xBE6D...), not vAMM router."""
+    import config as cfg
+    slipstream_entry = next(
+        (d for d in cfg._BASE_DEX_CONFIG if d["name"] == "Aerodrome Slipstream"), None
+    )
+    assert slipstream_entry is not None, "Aerodrome Slipstream not in _BASE_DEX_CONFIG"
+    router = slipstream_entry["router"].lower()
+    assert "be6d8f0d" in router, \
+        f"Aerodrome Slipstream DEX entry has wrong router: {slipstream_entry['router']}"
+    assert "cf77a3ba" not in router, \
+        f"Aerodrome Slipstream DEX entry still uses vAMM router"
+
+
+def test_wrong_router_not_used_for_exactinputsingle():
+    """executor._PAIR_EXEC_PARAMS must not silently use default tick_spacing=50 for active pairs."""
+    from executor import _PAIR_EXEC_PARAMS, _DEFAULT_EXEC_PARAMS
+    import config as cfg
+    active_pairs = [p["name"] for p in cfg._BASE_PAIR_CONFIG]
+    for pair in active_pairs:
+        ep = _PAIR_EXEC_PARAMS.get(pair, _DEFAULT_EXEC_PARAMS)
+        tick = ep["aero_tick"]
+        assert tick not in (500, 3000, 10000), \
+            f"{pair} has fee tier {tick} as aero_tick — must be actual tickSpacing"
+
+
+def test_tick_spacing_weth_usdc():
+    """WETH/USDC Slipstream tick spacing must be 100, not 200."""
+    from executor import _PAIR_EXEC_PARAMS
+    assert "WETH/USDC" in _PAIR_EXEC_PARAMS, "WETH/USDC missing from _PAIR_EXEC_PARAMS"
+    tick = _PAIR_EXEC_PARAMS["WETH/USDC"]["aero_tick"]
+    assert tick == 100, f"Expected aero_tick=100 for WETH/USDC, got {tick}"
+
+
+def test_tick_spacing_cbbtc_usdc():
+    """cbBTC/USDC Slipstream tick spacing must be 1."""
+    from executor import _PAIR_EXEC_PARAMS
+    tick = _PAIR_EXEC_PARAMS["cbBTC/USDC"]["aero_tick"]
+    assert tick == 1, f"Expected aero_tick=1 for cbBTC/USDC, got {tick}"
+
+
+def test_tick_spacing_cbbtc_weth():
+    """cbBTC/WETH Slipstream tick spacing must be 100."""
+    from executor import _PAIR_EXEC_PARAMS
+    assert "cbBTC/WETH" in _PAIR_EXEC_PARAMS, "cbBTC/WETH missing from _PAIR_EXEC_PARAMS"
+    tick = _PAIR_EXEC_PARAMS["cbBTC/WETH"]["aero_tick"]
+    assert tick == 100, f"Expected aero_tick=100 for cbBTC/WETH, got {tick}"
+
+
+def test_deadline_is_dynamic():
+    """_build_arb_params must produce a deadline > now+60 and < now+600."""
+    import time
+    from executor import _build_arb_params, _PAIR_EXEC_PARAMS
+    import config as cfg
+    from arb_detector import ArbOpportunity, SimResult
+
+    opp = ArbOpportunity(
+        pair="cbBTC/USDC",
+        buy_venue="Uniswap V3",
+        sell_venue="Aerodrome Slipstream",
+        buy_price=65000.0, sell_price=65100.0,
+        gross_spread_pct=0.15, total_fee_pct=0.06, net_spread_pct=0.09,
+        flash_loan_usdc=17000.0, estimated_profit_usdc=15.0,
+        is_profitable=True, timestamp=time.time(), tier="MARGINAL",
+    )
+    sim = SimResult(
+        buy_dex="Uniswap V3", sell_dex="Aerodrome Slipstream",
+        token_amount=0.249, usdc_in=17000.0, usdc_out=17015.0,
+        gross_profit_usd=15.0, gas_cost_usd=0.5, net_profit_usd=14.5,
+        flash_provider="Morpho", is_executable=True, rejection_reason="",
+    )
+
+    before = int(time.time())
+    params = _build_arb_params(opp, sim, eth_price=2000.0)
+    deadline = params[8]  # index 8 = deadline field
+
+    assert deadline > before + 60, f"Deadline not far enough in future: {deadline} vs now={before}"
+    assert deadline < before + 600, f"Deadline suspiciously far in future: {deadline}"

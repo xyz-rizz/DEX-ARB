@@ -83,7 +83,8 @@ UNISWAP_SWAP_ROUTER_02: str = Web3.to_checksum_address("0x2626664c2603336E57B271
 UNISWAP_QUOTER_V2: str      = Web3.to_checksum_address("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a")
 UNISWAP_FACTORY: str        = Web3.to_checksum_address("0x33128a8fC17869897dcE68Ed026d694621f6FDfD")
 
-AERODROME_ROUTER: str        = Web3.to_checksum_address("0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43")
+AERODROME_ROUTER: str        = Web3.to_checksum_address("0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43")  # vAMM / main router (V2-style swapExactTokensForTokens)
+AERODROME_SLIPSTREAM_ROUTER: str = Web3.to_checksum_address("0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5")  # CL SwapRouter (exactInputSingle with tickSpacing)
 AERODROME_FACTORY: str       = Web3.to_checksum_address("0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A")
 AERODROME_VAMM_FACTORY: str  = Web3.to_checksum_address("0x420DD381b31aEf6683db6B902084cB0FFECe40Da")
 # Aerodrome Slipstream CL Quoter — uses tickSpacing instead of fee in quoteExactInputSingle.
@@ -270,9 +271,9 @@ PAIR_CONFIG = _ARBITRUM_PAIR_CONFIG if CHAIN == "arbitrum" else _BASE_PAIR_CONFI
 _BASE_DEX_CONFIG = [
     {
         "name": "Aerodrome Slipstream",
-        "type": "slipstream",          # Uniswap V3 CL fork; uses CLQuoter for execution quotes
+        "type": "slipstream",          # Uniswap V3 CL fork; uses CLQuoter for quotes, SwapRouter for execution
         "factory": "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A",
-        "router":  "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
+        "router":  "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",  # CL SwapRouter — exactInputSingle(tickSpacing)
         "quoter":  "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0",  # Aerodrome CLQuoter on Base
         "tick_spacings": [1, 50, 100, 200],
         "fee_pct": 0.0001,             # typical for tick_spacing=1
