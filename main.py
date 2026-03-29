@@ -357,8 +357,15 @@ def main() -> None:
         logger.critical("Config validation failed: %s", exc)
         sys.exit(1)
 
-    _read_url = config.ARB_RPC_URL if config.CHAIN == "arbitrum" else config.BASE_RPC_URL
+    # Scan provider: prefer DRPC_RPC_URL for high-rate price polling if set;
+    # fall back to BASE_RPC_URL (CDP) so existing .env files keep working.
+    if config.CHAIN == "arbitrum":
+        _read_url = config.ARB_RPC_URL
+    else:
+        _read_url = config.DRPC_RPC_URL or config.BASE_RPC_URL
     _exec_url = config.ARB_EXEC_URL if config.CHAIN == "arbitrum" else config.ALCHEMY_EXEC_URL
+    logger.info("Scan provider: %s", _read_url[:60] if _read_url else "NONE")
+    logger.info("Exec provider: %s", (_exec_url[:60] if _exec_url else "NONE"))
     w3_read = Web3(Web3.HTTPProvider(_read_url))
     try:
         _block = w3_read.eth.block_number

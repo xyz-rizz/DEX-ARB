@@ -65,7 +65,7 @@ def test_profitable_tag_never_written_to_jsonl(tmp_path):
          patch("main.detect_all_opportunities", return_value=[opp]), \
          patch("main.simulate_arb", return_value=sim), \
          patch("main.log_opportunity",
-               side_effect=lambda o, tag, sim=None: tags_logged.append(tag)), \
+               side_effect=lambda o, tag, *a, **kw: tags_logged.append(tag)), \
          patch("main.should_execute", return_value=(False, "EXECUTE_MODE=false")), \
          patch("main.config.LOG_DIR", str(tmp_path)):
         run_cycle(MagicMock(), None, CycleStats())
@@ -127,7 +127,7 @@ def test_depth_zero_never_reaches_simulate(tmp_path):
          patch("arb_detector.find_max_executable_size", return_value=0.0), \
          patch("main.simulate_arb") as mock_sim, \
          patch("main.log_opportunity",
-               side_effect=lambda o, tag, s=None: tags_logged.append(tag)), \
+               side_effect=lambda o, tag, *a, **kw: tags_logged.append(tag)), \
          patch("main.config.LOG_DIR", str(tmp_path)):
         run_cycle(MagicMock(), None, CycleStats())
 

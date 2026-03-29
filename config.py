@@ -36,12 +36,18 @@ PRIVATE_KEY: str = os.getenv("PRIVATE_KEY", "")
 WALLET_ADDRESS: str = "0x6F007D1C4F54954d9cdBb5fea81eB5A41FA9f312"
 
 # ── Deployed contract ─────────────────────────────────────────────────────────
-ARB_EXECUTOR_ADDRESS: str = os.getenv("ARB_EXECUTOR_ADDRESS", "")
+# Accept GENERIC_FLASH_ARB_ADDRESS as an alias for ARB_EXECUTOR_ADDRESS (.env compat).
+ARB_EXECUTOR_ADDRESS: str = (
+    os.getenv("ARB_EXECUTOR_ADDRESS", "")
+    or os.getenv("GENERIC_FLASH_ARB_ADDRESS", "")
+)
 
 # ── Bot behaviour ─────────────────────────────────────────────────────────────
 EXECUTE_MODE: bool           = os.getenv("EXECUTE_MODE", "false").lower() == "true"
 DRY_RUN: bool                = os.getenv("DRY_RUN", "true").lower() == "true"
 MIN_NET_PROFIT_USD: float    = float(os.getenv("MIN_NET_PROFIT_USD", "10.0"))
+# Maximum gas limit for executeArb calls. Set GFA_GAS_LIMIT_CAP in .env to override.
+GFA_GAS_LIMIT_CAP: int       = int(os.getenv("GFA_GAS_LIMIT_CAP", "600000"))
 # cbBTC floor ~0.06%, 0.065 = small safety margin
 MIN_SPREAD_PCT: float        = float(os.getenv("MIN_SPREAD_PCT", "0.065"))
 SCAN_INTERVAL_SECONDS: float = float(os.getenv("SCAN_INTERVAL_SECONDS", "2"))

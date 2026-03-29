@@ -70,7 +70,7 @@ def test_main_passes_dry_run_true_to_execute_arb(tmp_path):
          patch("main.simulate_arb", return_value=sim), \
          patch("main.execute_arb", side_effect=capture_execute), \
          patch("main.should_execute", return_value=(True, "")), \
-         patch("main.log_opportunity", side_effect=lambda o, tag, s=None: None), \
+         patch("main.log_opportunity", side_effect=lambda *a, **kw: None), \
          patch("main.config.DRY_RUN", True), \
          patch("main.config.LOG_DIR", str(tmp_path)):
         run_cycle(MagicMock(), MagicMock(), CycleStats())
@@ -101,7 +101,7 @@ def test_main_passes_dry_run_false_to_execute_arb(tmp_path):
          patch("main.simulate_arb", return_value=sim), \
          patch("main.execute_arb", side_effect=capture_execute), \
          patch("main.should_execute", return_value=(True, "")), \
-         patch("main.log_opportunity", side_effect=lambda o, tag, s=None: None), \
+         patch("main.log_opportunity", side_effect=lambda *a, **kw: None), \
          patch("main.config.DRY_RUN", False), \
          patch("main.config.LOG_DIR", str(tmp_path)):
         run_cycle(MagicMock(), MagicMock(), CycleStats())

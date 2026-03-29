@@ -214,7 +214,8 @@ def should_execute(opp: ArbOpportunity, sim: SimResult = None) -> tuple:
 
 # ── JSONL logger ───────────────────────────────────────────────────────────────
 
-def log_opportunity(opp: ArbOpportunity, tag: str, sim: SimResult = None) -> None:
+def log_opportunity(opp: ArbOpportunity, tag: str, sim: SimResult = None,
+                    error: str = "", tx_hash: str = "") -> None:
     """
     Append one opportunity record to logs/executions.jsonl.
 
@@ -250,9 +251,9 @@ def log_opportunity(opp: ArbOpportunity, tag: str, sim: SimResult = None) -> Non
         "profit_after_slippage_usd": round(sim.net_profit_usd, 4) if sim else 0,
         "sim_rejection":           sim.rejection_reason if sim else "",
         # execution fields
-        "tx_hash":               "",
+        "tx_hash":               tx_hash,
         "actual_profit_usdc":    0,
-        "error":                 "",
+        "error":                 error,
     }
 
     with path.open("a", encoding="utf-8") as fh:
@@ -323,18 +324,37 @@ def execute_arb(w3_exec, opp: ArbOpportunity, sim: SimResult,
         arb_params = _build_arb_params(opp, sim, eth_price)
         provider_int = 1 if (sim and sim.flash_provider == "Balancer") else 0
 
-        gas_price = w3_exec.eth.gas_price
-        nonce     = w3_exec.eth.get_transaction_count(wallet)
+        nonce = w3_exec.eth.get_transaction_count(wallet)
+
+        # Use EIP-1559 pricing on Base/Arbitrum for faster inclusion.
+        # Priority fee: 0.01 gwei base + 10% on top of baseFee for urgency.
+        try:
+            latest_block = w3_exec.eth.get_block("latest")
+            base_fee = latest_block.get("baseFeePerGas", w3_exec.eth.gas_price)
+            max_priority_fee = w3_exec.to_wei("0.01", "gwei")
+            max_fee = int(base_fee * 1.15) + max_priority_fee
+            tx_overrides = {
+                "from":                  wallet,
+                "gas":                   config.GFA_GAS_LIMIT_CAP,
+                "maxFeePerGas":          max_fee,
+                "maxPriorityFeePerGas":  max_priority_fee,
+                "nonce":                 nonce,
+                "chainId":               config.CHAIN_ID,
+            }
+        except Exception:
+            # Fallback to legacy gas pricing
+            gas_price = w3_exec.eth.gas_price
+            tx_overrides = {
+                "from":     wallet,
+                "gas":      config.GFA_GAS_LIMIT_CAP,
+                "gasPrice": gas_price * 2,
+                "nonce":    nonce,
+                "chainId":  config.CHAIN_ID,
+            }
 
         tx = contract.functions.executeArb(
             arb_params, provider_int
-        ).build_transaction({
-            "from":     wallet,
-            "gas":      600_000,
-            "gasPrice": gas_price * 2,
-            "nonce":    nonce,
-            "chainId":  config.CHAIN_ID,
-        })
+        ).build_transaction(tx_overrides)
 
         logger.info(
             "DRY_RUN | %s | to=%s | gas=%d | data=%s... | est_profit=$%.2f",
